@@ -2454,11 +2454,14 @@ function FullWhatsAppHubPanel({ defaultDistrict = '', defaultAssembly = '', onBa
   const [districtsData, setDistrictsData] = useState({})
 
   useEffect(() => {
-    publicApi.getDistrictsData()
-      .then((res) => {
-        if (res && res.data) setDistrictsData(res.data)
-      })
-      .catch(() => {})
+    if (chat && typeof chat.getDistrictsData === 'function') {
+      chat.getDistrictsData()
+        .then((res) => {
+          if (res && res.data) setDistrictsData(res.data)
+          else if (res && typeof res === 'object' && !Array.isArray(res)) setDistrictsData(res)
+        })
+        .catch(() => {})
+    }
   }, [])
 
   const availableDistricts = Object.keys(districtsData).length > 0 ? Object.keys(districtsData).sort() : TN_DISTRICTS_LIST
