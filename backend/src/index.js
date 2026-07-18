@@ -269,6 +269,11 @@ app.use('/admin/api', (req, res, next) => {
   return doubleCsrfProtection(req, res, next);
 });
 
+// ── Health check (keep-alive for Render free tier) ───────────────
+app.get('/health', (req, res) => {
+  res.status(200).json({ status: 'ok', env: config.nodeEnv, ts: new Date().toISOString() });
+});
+
 // ── API Routes ────────────────────────────────────────────────────
 app.use('/api',    chatRoutes);
 app.use('/admin',  adminRoutes);
