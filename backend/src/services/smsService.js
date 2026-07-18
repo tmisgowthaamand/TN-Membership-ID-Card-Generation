@@ -195,23 +195,84 @@ async function sendOtpViaTwilio(mobile, otp) {
 }
 
 /**
- * Send OTP via Twilio Verify, Twilio Messages, or 2factor.in API.
+ * Send OTP via BulkSMS REST API.
+ * @param {string} mobile - 10-digit Indian mobile number
+ * @param {string} otp    - 6-digit OTP
+ * @returns {{ success: boolean, message: string }}
+ */
+async function sendOtpViaBulkSms(mobile, otp) {
+  const { tokenId, tokenSecret } = config.bulksms;
+
+  let formattedMobile = mobile.trim();
+  if (!formattedMobile.startsWith('+')) {
+    if (formattedMobile.length === 10) {
+      formattedMobile = `+91${formattedMobile}`;
+    } else if (formattedMobile.length === 12 && formattedMobile.startsWith('91')) {
+      formattedMobile = `+${formattedMobile}`;
+    }
+  }
+
+  const messageBody = `Your verification OTP is ${otp}. Valid for 5 minutes.`;
+
+  try {
+    const auth = Buffer.from(`${tokenId}:${tokenSecret}`).toString('base64');
+    const url = 'https://api.bulksms.com/v1/messages';
+    
+    const resp = await axios.post(
+      url,
+      [
+        {
+          to: formattedMobile,
+          body: messageBody
+        }
+      ],
+      {
+        headers: {
+          'Authorization': `Basic ${auth}`,
+          'Content-Type': 'application/json'
+        },
+        timeout: 15000
+      }
+    );
+
+    if (resp.status === 201 || resp.status === 200) {
+      console.log(`[BulkSMS] OTP successfully sent to ...${mobile.slice(-4)}`);
+      const msgId = resp.data?.[0]?.id || 'unknown';
+      return { success: true, message: 'OTP sent successfully', sessionId: msgId };
+    }
+    
+    console.warn('[BulkSMS] Unexpected response status:', resp.status, resp.data);
+    return { success: false, message: 'Could not send OTP.' };
+  } catch (err) {
+    const details = err.response?.data || err.message;
+    console.error('[BulkSMS] Send error:', details);
+    return { success: false, message: 'Could not send OTP. Please try again.' };
+  }
+}
+
+/**
+ * Send OTP via BulkSMS, Twilio Verify, Twilio Messages, or 2factor.in API.
  * @param {string} mobile - 10-digit Indian mobile number
  * @param {string} otp    - 6-digit OTP
  * @returns {{ success: boolean, message: string }}
  */
 async function sendOtp(mobile, otp) {
-  // 1. Try Twilio Verify if configured
+  // 1. Try BulkSMS if configured
+  if (config.bulksms.tokenId && config.bulksms.tokenSecret) {
+    return sendOtpViaBulkSms(mobile, otp);
+  }
+
+  // 2. Try Twilio Verify if configured
   if (config.twilio.accountSid && config.twilio.serviceSid && config.twilio.apiKey && config.twilio.apiSecret) {
     return sendOtpViaTwilioVerify(mobile);
   }
 
-  // 2. Try Twilio Standard SMS if configured
+  // 3. Try Twilio Standard SMS if configured
   if (config.twilio.accountSid && config.twilio.apiKey && config.twilio.apiSecret) {
     return sendOtpViaTwilio(mobile, otp);
   }
 
-  // 3. Fallback to 2factor.in
+  // 4. Fallback to 2factor.in
   const apiKey   = config.smsApiKey;
   const template = config.smsTemplateName;
 
@@ -253,6 +314,10 @@ async function sendOtp(mobile, otp) {
  * @returns {Promise<{ success: boolean, message: string } | null>}
  */
 async function verifyOtp(mobile, otp) {
+  if (config.bulksms.tokenId && config.bulksms.tokenSecret) {
+    // With BulkSMS, we verify locally using the MongoDB otp_hash
+    return null;
+  }
   if (config.twilio.accountSid && config.twilio.serviceSid && config.twilio.apiKey && config.twilio.apiSecret) {
     return verifyOtpViaTwilioVerify(mobile, otp);
   }

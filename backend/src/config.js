@@ -110,6 +110,11 @@ const config = {
     serviceSid: process.env.TWILIO_VERIFY_SERVICE_SID || '',
   },
 
+  bulksms: {
+    tokenId:     process.env.BULKSMS_TOKEN_ID     || '',
+    tokenSecret: process.env.BULKSMS_TOKEN_SECRET || '',
+  },
+
   // WhatsApp Cloud API
   whatsapp: {
     verifyToken:    process.env.WHATSAPP_VERIFY_TOKEN    || '',

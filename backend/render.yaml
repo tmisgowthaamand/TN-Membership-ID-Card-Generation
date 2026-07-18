@@ -53,7 +53,12 @@ services:
         sync: false
       - key: TWILIO_VERIFY_SERVICE_SID
         sync: false
+      - key: BULKSMS_TOKEN_ID
+        sync: false
+      - key: BULKSMS_TOKEN_SECRET
+        sync: false
       - key: USE_MEMORY_DB
         value: "false"
       - key: USE_VOTERS_ALL
         value: "true"
+
