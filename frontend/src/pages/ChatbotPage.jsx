@@ -3965,10 +3965,6 @@ export default function ChatbotPage() {
     if (initializedRef.current) return
     initializedRef.current = true
 
-    if ('Notification' in window && Notification.permission === 'default') {
-      Notification.requestPermission();
-    }
-
     const cache = getCache()
     if (cache?.card) {
       cardRef.current    = cache.card
