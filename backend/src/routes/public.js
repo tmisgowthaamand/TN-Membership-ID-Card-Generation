@@ -301,6 +301,11 @@ router.get('/api/card-image/:epicNo', async (req, res) => {
       return res.status(404).send('Card not found');
     }
 
+    // Serve from Cloudinary if already uploaded, avoiding dynamic regeneration
+    if (genDoc.card_url && genDoc.card_url.startsWith('http')) {
+      return res.redirect(genDoc.card_url);
+    }
+
     const { findVoterByEpic } = require('../db');
     const { generateCard }    = require('../services/cardGenerator');
     
