@@ -22,6 +22,13 @@ export const FlipCard3D = forwardRef(function FlipCard3D(
   // iOS: preview overlay { url, blob, filename } — reliable save on all iOS browsers
   const [iosPreview, setIosPreview] = useState(null)
   const iframeRef = useRef(null)
+  const imgRef = useRef(null)
+
+  useEffect(() => {
+    if (imgRef.current && imgRef.current.complete) {
+      setLoading(false)
+    }
+  }, [cardData?.card_url])
 
   // Card original dimensions
   const ORIG_W = 1576
@@ -413,6 +420,7 @@ export const FlipCard3D = forwardRef(function FlipCard3D(
           )}
           {cardData?.card_url ? (
             <img
+              ref={imgRef}
               src={cardData.card_url}
               alt="BJP Member Card"
               style={{
@@ -424,6 +432,7 @@ export const FlipCard3D = forwardRef(function FlipCard3D(
                 transition: 'opacity 0.3s ease'
               }}
               onLoad={() => setLoading(false)}
+              onError={() => setLoading(false)}
             />
           ) : (
             <iframe
