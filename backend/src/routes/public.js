@@ -263,7 +263,7 @@ router.get('/api/card/:epicNo', async (req, res) => {
       success:      true,
       card_url:     genDoc.card_url     || stat.card_url     || '',
       back_url:     genDoc.back_url     || stat.back_url     || '',
-      combined_url: genDoc.combined_url || stat.combined_url || '',
+      combined_url: '',
       photo_url:    await getPhotoPresignedUrl(genDoc.photo_url || stat.photo_url || ''),
       bjp_code:     genDoc.bjp_code   || '',
       gen_count:    stat.count        || 0,

@@ -603,7 +603,7 @@ router.post('/:token', upload.single('photo'), async (req, res) => {
         {
           $set: {
             EPIC_NO: epicNo, bjp_code: bjpCode,
-            photo_url: photoUrl, card_url: frontUrl, back_url: '', combined_url: frontUrl,
+            photo_url: photoUrl, card_url: frontUrl, back_url: '', combined_url: '',
             generated_at: now,
             VOTER_NAME:    pending.voter_name    || '',
             ASSEMBLY_NAME: pending.assembly_name || '',

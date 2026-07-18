@@ -499,7 +499,7 @@ async function handleImageMessage(from, mobile, imageInfo, db) {
           photo_url:               photoUrl,
           card_url:                frontUrl,
           back_url:                '',
-          combined_url:            frontUrl,
+          combined_url:            '',
           generated_at:            now,
           VOTER_NAME:              pending.voter_name    || '',
           ASSEMBLY_NAME:           pending.assembly_name || '',
