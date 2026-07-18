@@ -4972,27 +4972,6 @@ export default function ChatbotPage() {
                   >
                     <i className="bi bi-whatsapp" style={{ fontSize: 18 }} /> Open Official WhatsApp
                   </a>
-                  <a
-                    href="/admin"
-                    target="_blank"
-                    rel="noreferrer"
-                    style={{
-                      display: 'inline-flex',
-                      alignItems: 'center',
-                      justifyContent: 'center',
-                      gap: 8,
-                      background: 'rgba(255,255,255,0.06)',
-                      color: 'var(--color-chalk)',
-                      border: '1px solid rgba(255,255,255,0.15)',
-                      padding: '10px 20px',
-                      borderRadius: 8,
-                      fontWeight: 600,
-                      fontSize: 13,
-                      textDecoration: 'none'
-                    }}
-                  >
-                    <i className="bi bi-person-badge" /> Admin / Organizer Login
-                  </a>
                 </div>
               </div>
             </FullFormPanel>
