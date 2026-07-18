@@ -538,6 +538,7 @@ router.get('/api/voters/:epicNo', async (req, res) => {
 router.get('/api/generated-voters', async (req, res) => {
   try {
     const search   = sanitizeSearch(req.query.search || '');
+    const district = String(req.query.district || '').trim();
     const assembly = String(req.query.assembly || '').trim();
     const page     = Math.max(1, parseInt(req.query.page, 10) || 1);
     const perPage  = Math.min(Math.max(parseInt(req.query.per_page, 10) || 20, 5), 100);
@@ -545,6 +546,7 @@ router.get('/api/generated-voters', async (req, res) => {
     const db   = getDb();
     const filt = {};
 
+    if (district) filt.DISTRICT_NAME = district;
     if (assembly) filt.ASSEMBLY_NAME = assembly;
     if (search) {
       // Escape regex special chars to prevent ReDoS

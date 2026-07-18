@@ -175,8 +175,31 @@ export default function GeneratedVoterDetailPage() {
           </div>
         </div>
 
-        {/* Action verify button */}
-        <div style={{ zIndex: 2 }}>
+        {/* Action buttons */}
+        <div style={{ zIndex: 2, display: 'flex', gap: 10, flexWrap: 'wrap' }}>
+          {(v.mobile || v.MOBILE_NO) && (
+            <a
+              href={`https://wa.me/91${String(v.mobile || v.MOBILE_NO).replace(/\D/g, '').slice(-10)}?text=${encodeURIComponent(`Vanakkam ${v.name || v.VOTER_NAME || 'Member'}! Your BJP Member ID is ${bjpCode}. View your digital ID card here: ${v.card_url || ''}`)}`}
+              target="_blank"
+              rel="noreferrer"
+              style={{
+                padding: '10px 20px',
+                borderRadius: 'var(--radius-buttons)',
+                fontWeight: '600',
+                fontSize: 13,
+                display: 'inline-flex',
+                alignItems: 'center',
+                gap: 8,
+                textDecoration: 'none',
+                background: '#25D366',
+                color: '#fff',
+                border: 'none',
+                boxShadow: 'var(--shadow-sm)'
+              }}
+            >
+              <i className="bi bi-whatsapp" style={{ fontSize: 16 }} /> Chat on WhatsApp
+            </a>
+          )}
           {v.epic_no && (
             <a href={`/verify/${v.bjp_code || v.epic_no}`} target="_blank" rel="noreferrer" className="btn-action btn-view" style={{
               padding: '10px 20px',

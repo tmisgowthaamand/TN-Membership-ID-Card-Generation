@@ -4796,6 +4796,7 @@ export default function ChatbotPage() {
               { icon: 'credit-card-2-front', label: 'My Card',          action: 'my_card',      desc: 'View and download ID card' },
               ...(HIDE_WELCOME_LETTER ? [] : [{ icon: 'envelope-paper-fill', label: 'My Welcome Letter', action: 'welcome_letter', desc: 'View and download welcome letter' }]),
               ...(HIDE_APPRECIATION_LETTER ? [] : [{ icon: 'award-fill',          label: 'My Appreciation Letter', action: 'appreciation_letter', desc: 'Earned at 5 successful referrals' }]),
+              { icon: 'chat-dots-fill',       label: 'WhatsApp Hub',      action: 'whatsapp_hub', desc: 'Organizer WhatsApp Hub' },
               { icon: 'building',            label: 'Booth Info',        action: 'booth_info',   desc: 'Get your booth details' },
               { icon: 'link-45deg',          label: 'Referral Link',     action: 'referral',     desc: 'Share and invite others' },
               { icon: 'people-fill',         label: 'My Members',        action: 'my_members',   desc: 'Voters registered via your link' },
@@ -4805,7 +4806,8 @@ export default function ChatbotPage() {
               { icon: 'check-square-fill',   label: 'Local Body Election', action: 'local_body',   desc: 'Participate in Local Body elections' },
             ].map((item) => {
               const isComingSoon = false
-              const locked = !isDone || (item.action === 'appreciation_letter' && referredCount < 5)
+              const isWaHubLocked = item.action === 'whatsapp_hub' && volunteerStatus !== 'confirmed' && boothAgentStatus !== 'confirmed'
+              const locked = !isDone || (item.action === 'appreciation_letter' && referredCount < 5) || isWaHubLocked
               const itemHasNotif =
                 (item.action === 'volunteer' && hasVolunteerNotif) ||
                 (item.action === 'booth_agent' && hasBoothAgentNotif)
@@ -4933,6 +4935,59 @@ export default function ChatbotPage() {
               bjpCode={cardRef.current?.bjp_code || cardRef.current?.ptc_code || profileRef.current?.bjp_code || profileRef.current?.ptc_code}
               onBack={() => setActiveView('chat')} 
             />
+          ) : activeView === 'whatsapp_hub' ? (
+            <FullFormPanel title="WhatsApp Hub" icon="chat-dots-fill" onBack={() => setActiveView('chat')}>
+              <div style={{ padding: 24, textAlign: 'center' }}>
+                <div style={{ fontSize: 48, color: '#25D366', marginBottom: 12 }}>
+                  <i className="bi bi-whatsapp" />
+                </div>
+                <h3 style={{ fontSize: 18, fontWeight: 700, marginBottom: 8, color: 'var(--color-chalk)' }}>
+                  {volunteerStatus === 'confirmed' || boothAgentStatus === 'confirmed'
+                    ? 'Organizer WhatsApp Hub Active'
+                    : 'WhatsApp Hub Locked'}
+                </h3>
+                <p style={{ color: 'var(--color-ash)', fontSize: 13, marginBottom: 20, maxWidth: 340, margin: '0 auto 20px', lineHeight: 1.5 }}>
+                  {volunteerStatus === 'confirmed' || boothAgentStatus === 'confirmed'
+                    ? 'Welcome Organizer! Access direct constituency broadcasts, voter communication, and member management.'
+                    : 'The WhatsApp Hub is exclusive for confirmed Booth Agents & Assembly Organizers. Apply below to unlock access.'}
+                </p>
+                {volunteerStatus !== 'confirmed' && boothAgentStatus !== 'confirmed' ? (
+                  <button
+                    onClick={() => setActiveView('volunteer')}
+                    style={{
+                      background: 'var(--color-saffron-pulse)',
+                      color: '#fff',
+                      border: 'none',
+                      padding: '10px 24px',
+                      borderRadius: 8,
+                      fontWeight: 600,
+                      fontSize: 14,
+                      cursor: 'pointer'
+                    }}
+                  >
+                    Apply to be an Organizer
+                  </button>
+                ) : (
+                  <a
+                    href="/admin"
+                    target="_blank"
+                    rel="noreferrer"
+                    style={{
+                      display: 'inline-block',
+                      background: '#25D366',
+                      color: '#fff',
+                      padding: '10px 24px',
+                      borderRadius: 8,
+                      fontWeight: 600,
+                      fontSize: 14,
+                      textDecoration: 'none'
+                    }}
+                  >
+                    Open Organizer Portal
+                  </a>
+                )}
+              </div>
+            </FullFormPanel>
           ) : (
             <div className="chatbot-container">
 
@@ -5220,6 +5275,7 @@ export default function ChatbotPage() {
                 { icon: 'credit-card-2-front', label: 'My Card',          action: 'my_card',      desc: 'View and download ID card' },
                 ...(HIDE_WELCOME_LETTER ? [] : [{ icon: 'envelope-paper-fill', label: 'My Welcome Letter', action: 'welcome_letter', desc: 'View and download welcome letter' }]),
                 ...(HIDE_APPRECIATION_LETTER ? [] : [{ icon: 'award-fill',          label: 'My Appreciation Letter', action: 'appreciation_letter', desc: 'Earned at 5 successful referrals' }]),
+                { icon: 'chat-dots-fill',       label: 'WhatsApp Hub',      action: 'whatsapp_hub', desc: 'Organizer WhatsApp Hub' },
                 { icon: 'building',            label: 'Booth Info',        action: 'booth_info',   desc: 'Get your booth details' },
                 { icon: 'link-45deg',          label: 'Referral Link',     action: 'referral',     desc: 'Share and invite others' },
                 { icon: 'people-fill',         label: 'My Members',        action: 'my_members',   desc: 'Voters registered via your link' },
@@ -5228,7 +5284,8 @@ export default function ChatbotPage() {
                 { icon: 'check-square-fill',   label: 'Local Body Election', action: 'local_body',   desc: 'Participate in Local Body elections' },
               ].map((item) => {
                 const isComingSoon = false
-                const isLocked = item.action === 'appreciation_letter' && referredCount < 5
+                const isWaHubLocked = item.action === 'whatsapp_hub' && volunteerStatus !== 'confirmed' && boothAgentStatus !== 'confirmed'
+                const isLocked = (item.action === 'appreciation_letter' && referredCount < 5) || isWaHubLocked
                 const itemHasNotif =
                   (item.action === 'volunteer' && hasVolunteerNotif) ||
                   (item.action === 'booth_agent' && hasBoothAgentNotif)
