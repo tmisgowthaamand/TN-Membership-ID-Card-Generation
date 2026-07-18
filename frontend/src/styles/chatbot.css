@@ -109,6 +109,15 @@
   overflow: hidden;
 }
 
+@media (max-width: 768px) {
+  .chatbot-container {
+    height: calc(100dvh - 80px);
+    max-height: 720px;
+    min-height: 480px;
+    border-radius: 12px;
+  }
+}
+
 /* Chat Header */
 .chat-header {
   background-color: var(--color-carbon);

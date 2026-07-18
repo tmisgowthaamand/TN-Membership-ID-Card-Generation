@@ -1,13 +1,37 @@
 import React, { useRef, useEffect, useState } from 'react'
 
 export const CardPreviewIframe = React.forwardRef(({ cardData, width = 340, showDownloadIcon = false, onCardClick = null }, ref) => {
+  const containerRef = useRef(null)
   const iframeRef = useRef(null)
   const [loading, setLoading] = useState(true)
   const [downloading, setDownloading] = useState(false)
+  const [containerWidth, setContainerWidth] = useState(0)
 
   useEffect(() => {
     setLoading(true)
   }, [cardData])
+
+  useEffect(() => {
+    const measure = () => {
+      if (containerRef.current && containerRef.current.parentElement) {
+        const pW = containerRef.current.parentElement.clientWidth
+        if (pW > 0) {
+          setContainerWidth(pW)
+        }
+      } else if (typeof window !== 'undefined') {
+        setContainerWidth(window.innerWidth - 32)
+      }
+    }
+    measure()
+    const timer = setTimeout(measure, 100)
+    window.addEventListener('resize', measure)
+    window.addEventListener('orientationchange', measure)
+    return () => {
+      clearTimeout(timer)
+      window.removeEventListener('resize', measure)
+      window.removeEventListener('orientationchange', measure)
+    }
+  }, [])
 
   const download = async () => {
     const cardUrl = cardData?.combined_url || cardData?.card_url || ''
@@ -101,7 +125,7 @@ export const CardPreviewIframe = React.forwardRef(({ cardData, width = 340, show
       if (midInput) midInput.value = midVal.toUpperCase()
 
       if (photoImg && photoUrl) {
-        photoImg.crossOrigin = 'anonymous';
+        photoImg.crossOrigin = 'anonymous'
         photoImg.src = photoUrl
         photoImg.style.display = 'block'
         const photoBox = doc.getElementById('photo-box')
@@ -123,14 +147,14 @@ export const CardPreviewIframe = React.forwardRef(({ cardData, width = 340, show
       }
 
       if (qrImg && epic) {
-        let qrData = cardData.referral_link || '';
+        let qrData = cardData.referral_link || ''
         if (!qrData && bjpCode && cardData.referral_id) {
-          qrData = `${window.location.origin}/refer/${bjpCode}/${cardData.referral_id}`;
+          qrData = `${window.location.origin}/refer/${bjpCode}/${cardData.referral_id}`
         }
         if (!qrData) {
-          qrData = `${window.location.origin}/verify/${bjpCode || epic}`;
+          qrData = `${window.location.origin}/verify/${bjpCode || epic}`
         }
-        qrImg.src = `https://api.qrserver.com/v1/create-qr-code/?size=400x400&ecc=H&data=${encodeURIComponent(qrData)}`;
+        qrImg.src = `https://api.qrserver.com/v1/create-qr-code/?size=400x400&ecc=H&data=${encodeURIComponent(qrData)}`
       }
 
       // Trigger generate card preview inside template
@@ -163,21 +187,30 @@ export const CardPreviewIframe = React.forwardRef(({ cardData, width = 340, show
     }
   }, [cardData])
 
-  // Calculate scale based on target width (card original width is 1576)
-  const scale = width / 1576
+  // Calculate dynamic scale responsive for Mobile/iPhone/Tablet/Desktop
+  const availW = containerWidth > 0 ? containerWidth : (typeof window !== 'undefined' ? window.innerWidth - 32 : width)
+  const targetW = Math.min(width, availW)
+  const effectiveWidth = Math.max(250, targetW)
+  const scale = effectiveWidth / 1576
   const height = Math.round(998 * scale)
 
   return (
-    <div style={{
-      width: `${width}px`,
-      height: `${height}px`,
-      overflow: 'hidden',
-      position: 'relative',
-      borderRadius: '12px',
-      border: '1px solid rgba(255, 255, 255, 0.15)',
-      background: '#F9F8F6',
-      boxShadow: '0 4px 16px rgba(0, 0, 0, 0.2)'
-    }}>
+    <div
+      ref={containerRef}
+      style={{
+        width: `${effectiveWidth}px`,
+        maxWidth: '100%',
+        height: `${height}px`,
+        overflow: 'hidden',
+        position: 'relative',
+        borderRadius: '12px',
+        border: '1px solid rgba(255, 255, 255, 0.15)',
+        background: '#F9F8F6',
+        boxShadow: '0 4px 16px rgba(0, 0, 0, 0.2)',
+        touchAction: 'pan-y',
+        margin: '0 auto',
+      }}
+    >
       {onCardClick && (
         <div
           role="button"
@@ -270,6 +303,7 @@ export const CardPreviewIframe = React.forwardRef(({ cardData, width = 340, show
           transformOrigin: 'top left',
           pointerEvents: 'none',
           maxWidth: 'none',
+          WebkitOverflowScrolling: 'touch',
         }}
         onLoad={handleIframeLoad}
       />
