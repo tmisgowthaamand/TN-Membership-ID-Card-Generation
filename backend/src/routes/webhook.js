@@ -28,7 +28,7 @@ const {
   sendCtaUrlMessage,
 } = require('../services/whatsappService');
 const { generateCard, generateBackCard } = require('../services/cardGenerator');
-const { uploadPhoto, uploadCard, uploadBackCard, getCardPresignedUrl } = require('../services/backblazeService');
+const { uploadPhoto, uploadCard, uploadBackCard } = require('../services/cloudinaryService');
 
 const BTN_MY_CARD = 'btn_my_card';
 
@@ -479,10 +479,7 @@ async function handleImageMessage(from, mobile, imageInfo, db) {
       return;
     }
 
-    // FIX-06: store the card in Backblaze B2 (private, unguessable key) and
-    // serve it via a time-limited presigned URL — no public static file.
-    const cardKey = await uploadCard(frontBuffer, epicNo, mobile);
-    const frontUrl = await getCardPresignedUrl(cardKey);
+    const frontUrl = await uploadCard(frontBuffer, epicNo, mobile);
     const now = new Date();
 
     // Generate referral link for this new member
@@ -500,7 +497,6 @@ async function handleImageMessage(from, mobile, imageInfo, db) {
           EPIC_NO:                 epicNo,
           bjp_code:                bjpCode,
           photo_url:               photoUrl,
-          card_b2_key:             cardKey,
           card_url:                frontUrl,
           back_url:                '',
           combined_url:            frontUrl,

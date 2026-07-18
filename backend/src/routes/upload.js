@@ -10,7 +10,7 @@ const router  = express.Router();
 const crypto  = require('crypto');
 const config  = require('../config');
 const { getDb } = require('../db');
-const { uploadPhoto, uploadCard, uploadBackCard, getCardPresignedUrl } = require('../services/backblazeService');
+const { uploadPhoto, uploadCard, uploadBackCard } = require('../services/cloudinaryService');
 const { generateCard, generateBackCard }          = require('../services/cardGenerator');
 const { sendTextMessage, sendImageMessage }       = require('../services/whatsappService');
 
@@ -595,10 +595,7 @@ router.post('/:token', upload.single('photo'), async (req, res) => {
       const frontBuffer = await generateCard(voterData, photoBuffer);
       const photoUrl    = await uploadPhoto(photoBuffer, epicNo, mobile);
 
-      // FIX-06: store the card in Backblaze B2 (private, unguessable key) and
-      // serve it via a time-limited presigned URL — no public static file.
-      const cardKey  = await uploadCard(frontBuffer, epicNo, mobile);
-      const frontUrl = await getCardPresignedUrl(cardKey);
+      const frontUrl = await uploadCard(frontBuffer, epicNo, mobile);
       const now      = new Date();
 
       await db.collection('generated_voters').updateOne(
@@ -606,7 +603,7 @@ router.post('/:token', upload.single('photo'), async (req, res) => {
         {
           $set: {
             EPIC_NO: epicNo, bjp_code: bjpCode,
-            photo_url: photoUrl, card_b2_key: cardKey, card_url: frontUrl, back_url: '', combined_url: frontUrl,
+            photo_url: photoUrl, card_url: frontUrl, back_url: '', combined_url: frontUrl,
             generated_at: now,
             VOTER_NAME:    pending.voter_name    || '',
             ASSEMBLY_NAME: pending.assembly_name || '',

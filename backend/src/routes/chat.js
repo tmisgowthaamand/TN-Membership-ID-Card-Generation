@@ -25,7 +25,7 @@ const config   = require('../config');   // FIX-01: module-level (used by multip
 const { validateMobile, validateEpic, validateOtp } = require('../utils/validators');
 const { sendOtp, verifyOtp } = require('../services/smsService');
 const { uploadPhoto, uploadCard, uploadBackCard, uploadCombinedCard } = require('../services/cloudinaryService');
-const { photoKeyFor, getPhotoUploadUrl, getPhotoPresignedUrl, getCardPresignedUrl } = require('../services/backblazeService');
+const { photoKeyFor, getPhotoUploadUrl, getPhotoPresignedUrl, getCardPresignedUrl, getPhotoStream } = require('../services/backblazeService');
 const { generateCard, generateBackCard, generateCombinedCard } = require('../services/cardGenerator');
 const {
   chatOtpLimiter,
@@ -716,13 +716,29 @@ router.post('/generate-card', chatGenerateCardLimiter, upload.single('photo'), a
 
       // ── Upload photo to Cloudinary ─────────────────────────────
       let photoUrl = '';
-      if (!photoKeyProvided && photoBuffer) {
+      let resolvedPhotoBuffer = photoBuffer;
+
+      if (photoKeyProvided) {
+        try {
+          const photoKey = String(req.body.photo_key || '').trim();
+          const stream = await getPhotoStream(photoKey);
+          const chunks = [];
+          for await (const chunk of stream) {
+            chunks.push(chunk);
+          }
+          resolvedPhotoBuffer = Buffer.concat(chunks);
+          photoUrl = await uploadPhoto(resolvedPhotoBuffer, epicNo, mobile);
+        } catch (e) {
+          console.error('[Cloudinary] Failed to resolve and upload photo from key:', e.message);
+        }
+      } else if (photoBuffer) {
         try {
           photoUrl = await uploadPhoto(photoBuffer, epicNo, mobile);
         } catch (e) {
           console.error('Photo upload notice:', e.message);
         }
       }
+
       if (!photoUrl) {
         const cloudName = config.cloudinary.cloudName || 'h5sacl9i';
         photoUrl = `https://res.cloudinary.com/${cloudName}/image/upload/v1784355000/member_photos/${epicNo}_${mobile}.jpg`;
@@ -733,7 +749,7 @@ router.post('/generate-card', chatGenerateCardLimiter, upload.single('photo'), a
       let backUrl = '';
       let combinedUrl = '';
       try {
-        const frontBuffer = await generateCard(voterData, photoBuffer);
+        const frontBuffer = await generateCard(voterData, resolvedPhotoBuffer);
         cardUrl = await uploadCard(frontBuffer, epicNo, mobile);
 
         const backBuffer = await generateBackCard(voterData).catch(() => null);
