@@ -122,7 +122,7 @@ const config = {
     },
   },
 
-  baseUrl:       process.env.BASE_URL       || 'http://localhost:5000',
+  baseUrl:       process.env.BASE_URL       || 'https://tn-membership-id-card-generation.onrender.com',
   frontendUrl:   process.env.FRONTEND_URL   || 'https://we-the-leader.vercel.app',
   // Comma-separated list of extra allowed CORS origins e.g. preview deploy URLs
   extraOrigins:  process.env.EXTRA_ORIGINS
