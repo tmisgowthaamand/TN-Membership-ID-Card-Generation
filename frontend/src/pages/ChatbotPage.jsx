@@ -4354,6 +4354,10 @@ export default function ChatbotPage() {
       setActiveView('appreciation_letter')
       return
     }
+    if (action === 'whatsapp_hub') {
+      setActiveView('whatsapp_hub')
+      return
+    }
     if (action === 'best_performers') {
       setActiveView('best_performers')
       return
