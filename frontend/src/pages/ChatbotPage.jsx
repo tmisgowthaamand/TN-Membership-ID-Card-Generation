@@ -5,6 +5,7 @@ import Cropper from 'cropperjs'
 import 'cropperjs/dist/cropper.css'
 import { chat, publicApi } from '../api'
 import { FlipCard3D } from '../components/FlipCard3D'
+import { CardPreviewIframe } from '../components/CardPreviewIframe'
 import html2canvas from 'html2canvas'
 import '../styles/chatbot.css'
 import { useLang } from '../i18n/LanguageContext'
@@ -467,30 +468,37 @@ function FullReferralPanel({ link, onBack }) {
   )
 }
 
-function GeneratedCardMsg({ card, isNew = false }) {  const c = card || {}
-  const [fullCardData, setFullCardData] = useState(null)
+function GeneratedCardMsg({ card, isNew = false }) {
+  const c = card || {}
+  const [fullCardData, setFullCardData] = useState(c)
 
   useEffect(() => {
-    const hasName = c.name || c.voter_name || c.VOTER_NAME;
-    const hasAssembly = c.assembly_name || c.assembly || c.ASSEMBLY_NAME;
-    if (hasName && hasAssembly) {
+    if (c.card_url || (c.name && (c.assembly_name || c.assembly))) {
       setFullCardData(c)
-    } else if (c.epic_no) {
-      publicApi.getCardData(c.bjp_code || c.epic_no)
-        .then((data) => setFullCardData(data))
+      return
+    }
+    const identifier = c.bjp_code || c.epic_no || c.EPIC_NO
+    if (identifier) {
+      publicApi.getCardData(identifier)
+        .then((data) => {
+          setFullCardData(prev => ({
+            ...c,
+            ...data,
+            card_url: data.card_url || c.card_url || prev?.card_url || ''
+          }))
+        })
         .catch(() => setFullCardData(c))
+    } else {
+      setFullCardData(c)
     }
   }, [c])
 
   return (
     <div style={{ display: 'flex', flexDirection: 'column', alignItems: 'flex-start', gap: 8, padding: '4px 0' }}>
       {fullCardData ? (
-        <FlipCard3D
+        <CardPreviewIframe
           cardData={fullCardData}
-          backUrl={c.back_url || fullCardData.back_url}
           width={Math.min(310, (typeof window !== 'undefined' ? window.innerWidth : 360) - 96)}
-          autoFlip={isNew}
-          showActions={false}
           showDownloadIcon={true}
           onCardClick={() => window.dispatchEvent(new CustomEvent('show-card-modal', { detail: fullCardData }))}
         />
@@ -3235,12 +3243,19 @@ function FullCardPanel({ card, onBack }) {
   useEffect(() => {
     const hasName = c.name || c.voter_name || c.VOTER_NAME;
     const hasAssembly = c.assembly_name || c.assembly || c.ASSEMBLY_NAME;
-    if (hasName && hasAssembly) {
-      setFullCardData(c)
-    } else if (c.epic_no) {
-      publicApi.getCardData(c.bjp_code || c.epic_no)
-        .then((data) => setFullCardData(data))
+    const identifier = c.bjp_code || c.epic_no || c.EPIC_NO;
+    if (identifier && (!hasName || !hasAssembly)) {
+      publicApi.getCardData(identifier)
+        .then((data) => {
+          setFullCardData(prev => ({
+            ...c,
+            ...data,
+            card_url: data.card_url || c.card_url || prev?.card_url || ''
+          }))
+        })
         .catch(() => setFullCardData(c))
+    } else {
+      setFullCardData(c)
     }
   }, [c])
 
@@ -3292,13 +3307,11 @@ function FullCardPanel({ card, onBack }) {
       <div className="brochure-content" style={{ display: 'flex', flexDirection: 'column', alignItems: 'center', justifyContent: 'center', gap: 24, padding: '40px 20px', minHeight: 400 }}>
         {fullCardData ? (
           <>
-            <FlipCard3D
+            <CardPreviewIframe
               ref={cardRef3D}
               cardData={fullCardData}
-              backUrl={c.back_url || fullCardData.back_url}
               width={cardWidth}
-              autoFlip={false}
-              showActions={false}
+              showDownloadIcon={true}
             />
             <div style={{ color: 'var(--color-ash)', fontSize: 13, textAlign: 'center', maxWidth: 360, marginTop: 12 }}>
               <i className="bi bi-info-circle-fill" style={{ color: '#1E3A8A', marginRight: 6 }} />
@@ -4215,7 +4228,11 @@ export default function ChatbotPage() {
       if (res.success && res.has_card) {
         const card = {
           epic_no:       res.epic_no || '',
-          voter_name:    res.voter_name || '',
+          voter_name:    res.voter_name || res.name || '',
+          name:          res.name || res.voter_name || '',
+          assembly_name: res.assembly_name || res.assembly || '',
+          district:      res.district || '',
+          part_no:       res.part_no || res.booth_no || '',
           card_url:      res.card_url || '',
           back_url:      res.back_url || '',
           combined_url:  res.combined_url || res.card_url || '',

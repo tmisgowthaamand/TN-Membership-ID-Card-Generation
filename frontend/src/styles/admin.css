@@ -154,13 +154,13 @@
 }
 
 .admin-nav-item:hover {
-  background: rgba(242, 101, 34, 0.04);
+  background: rgba(30, 58, 138, 0.05);
   color: var(--color-harvest-flame);
   text-decoration: none;
 }
 
 .admin-nav-item.active {
-  background: rgba(242, 101, 34, 0.08);
+  background: rgba(30, 58, 138, 0.1);
   color: var(--color-harvest-flame);
   border-left-color: var(--color-harvest-flame);
   text-decoration: none;
@@ -184,8 +184,8 @@
   gap: 8px;
   padding: 10px 12px;
   width: 100%;
-  background: rgba(242, 101, 34, 0.06);
-  border: 1px solid rgba(242, 101, 34, 0.2);
+  background: rgba(30, 58, 138, 0.06);
+  border: 1px solid rgba(30, 58, 138, 0.2);
   border-radius: var(--radius-buttons);
   color: var(--color-harvest-flame);
   font-size: 13px;
@@ -197,7 +197,7 @@
   font-weight: 600;
 }
 
-.admin-logout-btn:hover { background: rgba(242, 101, 34, 0.12); }
+.admin-logout-btn:hover { background: rgba(30, 58, 138, 0.12); }
 
 /* ── Main area ────────────────────────────────────────────── */
 .admin-main {
@@ -259,7 +259,7 @@
   align-items: center;
   gap: 6px;
   background: none;
-  border: 1px solid rgba(242, 101, 34, 0.3);
+  border: 1px solid rgba(30, 58, 138, 0.3);
   border-radius: var(--radius-buttons);
   color: var(--color-harvest-flame);
   font-size: 12.5px;
@@ -271,7 +271,7 @@
   font-weight: 600;
 }
 
-.admin-logout-btn-top:hover { background: rgba(242, 101, 34, 0.08); }
+.admin-logout-btn-top:hover { background: rgba(30, 58, 138, 0.08); }
 
 /* ── Content ──────────────────────────────────────────────── */
 .admin-content {
@@ -316,7 +316,7 @@
   transition: border-color 0.15s, transform 0.15s;
 }
 
-.stat-card:hover { border-color: rgba(242, 101, 34, 0.15); transform: translateY(-1px); }
+.stat-card:hover { border-color: rgba(30, 58, 138, 0.15); transform: translateY(-1px); }
 
 .stat-card-icon {
   width: 38px;
@@ -327,7 +327,7 @@
   justify-content: center;
   font-size: 18px;
   margin-bottom: 12px;
-  background: rgba(242, 101, 34, 0.08);
+  background: rgba(30, 58, 138, 0.08);
   color: var(--color-harvest-flame);
 }
 
@@ -412,7 +412,7 @@
 
 .admin-table tr:last-child td { border-bottom: none; }
 
-.admin-table tbody tr:hover td { background: rgba(242, 101, 34, 0.02); }
+.admin-table tbody tr:hover td { background: rgba(30, 58, 138, 0.03); }
 
 /* ── Form controls ────────────────────────────────────────── */
 .admin-search-input {
@@ -430,7 +430,7 @@
 
 .admin-search-input:focus {
   border-color: var(--color-harvest-flame);
-  box-shadow: 0 0 0 2px rgba(242, 101, 34, 0.15);
+  box-shadow: 0 0 0 2px rgba(30, 58, 138, 0.15);
 }
 .admin-search-input::placeholder { color: var(--admin-ink-dim); }
 
@@ -449,7 +449,7 @@
 
 .admin-select:focus {
   border-color: var(--color-harvest-flame);
-  box-shadow: 0 0 0 2px rgba(242, 101, 34, 0.15);
+  box-shadow: 0 0 0 2px rgba(30, 58, 138, 0.15);
 }
 
 /* ── Badges ───────────────────────────────────────────────── */
@@ -467,7 +467,7 @@
 
 .badge-pending   { background: rgba(217, 119, 6, 0.08);  color: var(--admin-badge-yellow); }
 .badge-confirmed { background: rgba(0, 160, 64, 0.08);  color: var(--admin-badge-green); }
-.badge-rejected  { background: rgba(242, 101, 34, 0.08);  color: var(--color-harvest-flame); }
+.badge-rejected  { background: rgba(239, 68, 68, 0.08);  color: #ef4444; }
 .badge-generated { background: rgba(2, 132, 199, 0.08); color: var(--admin-badge-blue); }
 
 /* ── Action buttons ───────────────────────────────────────── */
@@ -495,8 +495,8 @@
 .btn-confirm  { background: var(--admin-badge-green); color: #ffffff; }
 .btn-confirm:hover { background: #008c38; }
 
-.btn-reject   { background: var(--color-harvest-flame); color: #ffffff; }
-.btn-reject:hover { background: #d9531a; }
+.btn-reject   { background: #ef4444; color: #ffffff; }
+.btn-reject:hover { background: #dc2626; }
 
 /* ── Pagination ───────────────────────────────────────────── */
 .admin-pagination {
@@ -527,7 +527,7 @@
 }
 
 .page-btn:hover:not(.active):not(:disabled) {
-  background: rgba(242, 101, 34, 0.04);
+  background: rgba(30, 58, 138, 0.05);
   color: var(--color-harvest-flame);
   border-color: var(--color-harvest-flame);
 }
@@ -555,7 +555,7 @@
   align-items: center;
   justify-content: center;
   padding: 16px;
-  background-image: radial-gradient(ellipse at 50% 0%, rgba(242, 101, 34, 0.08) 0%, transparent 60%);
+  background-image: radial-gradient(ellipse at 50% 0%, rgba(30, 58, 138, 0.08) 0%, transparent 60%);
 }
 
 .admin-login-card {
@@ -565,7 +565,7 @@
   border-radius: var(--radius-cards);
   padding: 40px 32px;
   border: 1px solid var(--border-dim);
-  box-shadow: rgba(242, 101, 34, 0.06) 0px 8px 32px 0px, rgba(0, 0, 0, 0.03) 0px 2px 10px 0px;
+  box-shadow: rgba(30, 58, 138, 0.06) 0px 8px 32px 0px, rgba(0, 0, 0, 0.03) 0px 2px 10px 0px;
 }
 
 .admin-login-logo {
@@ -622,7 +622,7 @@
 
 .admin-form-control:focus {
   border-color: var(--color-harvest-flame);
-  box-shadow: 0 0 0 2px rgba(242, 101, 34, 0.15);
+  box-shadow: 0 0 0 2px rgba(30, 58, 138, 0.15);
 }
 .admin-form-control::placeholder { color: var(--admin-ink-dim); }
 

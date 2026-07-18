@@ -93,7 +93,7 @@ export default function GeneratedVoterDetailPage() {
       {/* Profile Hero Header Card */}
       <div className="admin-card" style={{
         background: 'linear-gradient(135deg, #fafafa 0%, #ffffff 100%)',
-        border: '1px solid rgba(242, 101, 34, 0.15)',
+        border: '1px solid rgba(30, 58, 138, 0.15)',
         borderRadius: 'var(--radius-cards)',
         padding: '24px',
         marginBottom: 24,
@@ -105,14 +105,14 @@ export default function GeneratedVoterDetailPage() {
         overflow: 'hidden',
         boxShadow: 'var(--shadow-card)'
       }}>
-        {/* Saffron Glow effect */}
+        {/* Deep Blue Glow effect */}
         <div style={{
           position: 'absolute',
           top: '-50%',
           right: '-10%',
           width: 300,
           height: 300,
-          background: 'radial-gradient(circle, rgba(242,101,34,0.06) 0%, rgba(242,101,34,0) 70%)',
+          background: 'radial-gradient(circle, rgba(30,58,138,0.06) 0%, rgba(30,58,138,0) 70%)',
           pointerEvents: 'none'
         }} />
         
@@ -123,22 +123,22 @@ export default function GeneratedVoterDetailPage() {
             height: 120,
             borderRadius: 12,
             objectFit: 'cover',
-            border: '2px solid rgba(242, 101, 34, 0.35)',
-            boxShadow: '0 4px 12px rgba(242, 101, 34, 0.08)'
+            border: '2px solid rgba(30, 58, 138, 0.2)',
+            boxShadow: '0 4px 12px rgba(30, 58, 138, 0.08)'
           }} />
         ) : (
           <div style={{
             width: 100,
             height: 120,
             borderRadius: 12,
-            background: 'linear-gradient(135deg, rgba(242,101,34,0.04) 0%, rgba(242,101,34,0.12) 100%)',
-            border: '2px solid rgba(242, 101, 34, 0.35)',
+            background: 'linear-gradient(135deg, rgba(30,58,138,0.04) 0%, rgba(30,58,138,0.12) 100%)',
+            border: '2px solid rgba(30, 58, 138, 0.2)',
             display: 'flex',
             alignItems: 'center',
             justifyContent: 'center',
-            boxShadow: '0 4px 12px rgba(242, 101, 34, 0.08)'
+            boxShadow: '0 4px 12px rgba(30, 58, 138, 0.08)'
           }}>
-            <i className="bi bi-person-fill" style={{ fontSize: 44, color: '#f26522' }} />
+            <i className="bi bi-person-fill" style={{ fontSize: 44, color: '#1E3A8A' }} />
           </div>
         )}
 
@@ -149,13 +149,13 @@ export default function GeneratedVoterDetailPage() {
               {v.name || v.VOTER_NAME || '—'}
             </h1>
             <span style={{
-              background: 'rgba(242, 101, 34, 0.08)',
-              color: '#f26522',
+              background: 'rgba(30, 58, 138, 0.08)',
+              color: '#1E3A8A',
               padding: '4px 10px',
               borderRadius: 20,
               fontSize: 12,
               fontWeight: '700',
-              border: '1px solid rgba(242, 101, 34, 0.2)'
+              border: '1px solid rgba(30, 58, 138, 0.2)'
             }}>
               {bjpCode}
             </span>
@@ -166,10 +166,10 @@ export default function GeneratedVoterDetailPage() {
 
           {/* Quick status badges */}
           <div style={{ display: 'flex', gap: 8, flexWrap: 'wrap' }}>
-            <span className={`badge-status badge-${volReq ? volReq.status : 'rejected'}`} style={{ padding: '6px 12px', borderRadius: 8, fontSize: 12 }}>
+            <span className={`badge-status badge-${volReq ? volReq.status : 'generated'}`} style={{ padding: '6px 12px', borderRadius: 8, fontSize: 12, background: volReq ? undefined : '#f1f5f9', color: volReq ? undefined : '#64748b' }}>
               <i className="bi bi-hand-thumbs-up-fill me-1.5" /> Organizer: {volReq ? volReq.status.toUpperCase() : 'NO'}
             </span>
-            <span className={`badge-status badge-${baReq ? baReq.status : 'rejected'}`} style={{ padding: '6px 12px', borderRadius: 8, fontSize: 12 }}>
+            <span className={`badge-status badge-${baReq ? baReq.status : 'generated'}`} style={{ padding: '6px 12px', borderRadius: 8, fontSize: 12, background: baReq ? undefined : '#f1f5f9', color: baReq ? undefined : '#64748b' }}>
               <i className="bi bi-building-fill-check me-1.5" /> Booth Agent: {baReq ? baReq.status.toUpperCase() : 'NO'}
             </span>
           </div>
@@ -227,7 +227,7 @@ export default function GeneratedVoterDetailPage() {
           {/* Voter Registration Profile Card */}
           <div className="admin-card" style={{ margin: 0 }}>
             <div className="admin-card-header" style={{ borderBottom: '1px solid var(--border-dim)', padding: '16px 20px' }}>
-              <h6 className="admin-card-title"><i className="bi bi-person-badge-fill" style={{ color: '#f26522' }} /> Voter Profile Data</h6>
+              <h6 className="admin-card-title"><i className="bi bi-person-badge-fill" style={{ color: '#1E3A8A' }} /> Voter Profile Data</h6>
             </div>
             <div style={{ padding: '20px' }}>
               <div style={{ display: 'grid', gridTemplateColumns: '1fr 1fr', gap: '16px 24px' }}>
@@ -249,14 +249,14 @@ export default function GeneratedVoterDetailPage() {
                   if (f.label === 'Booth Agent Status') {
                     if (f.value === 'CONFIRMED') valColor = '#2e7d32';
                     else if (f.value === 'REJECTED') valColor = '#c62828';
-                    else if (f.value === 'PENDING') valColor = '#ef6c00';
+                    else if (f.value === 'PENDING') valColor = '#2563eb';
                     valWeight = '700';
                   } else if (f.label === 'Local Body Interest' || f.label === 'President Meeting Status') {
                     if (f.value === 'Interested') valColor = '#2e7d32';
                     else if (f.value === 'Not Interested') valColor = '#c62828';
-                    else if (f.value === 'Not Answered') valColor = '#ef6c00';
+                    else if (f.value === 'Not Answered') valColor = 'var(--text-secondary)';
                     else valColor = 'var(--text-secondary)';
-                    valWeight = '700';
+                    valWeight = '600';
                   }
                   return (
                     <div key={f.label} style={{ display: 'flex', flexDirection: 'column', gap: 4 }}>
@@ -363,7 +363,7 @@ export default function GeneratedVoterDetailPage() {
                 alignItems: 'center',
                 justifyContent: 'space-between'
               }}>
-                <h6 className="admin-card-title" style={{ color: '#f26522' }}>
+                <h6 className="admin-card-title" style={{ color: '#1E3A8A' }}>
                   <i className="bi bi-building-fill-check me-2" /> Booth Agent Application
                 </h6>
                 <span className={`badge-status badge-${baReq.status}`}>{baReq.status}</span>
@@ -448,7 +448,7 @@ export default function GeneratedVoterDetailPage() {
           {(v.card_url || v.bjp_code || v.ptc_code) && (
             <div className="admin-card" style={{ margin: 0 }}>
               <div className="admin-card-header" style={{ borderBottom: '1px solid var(--border-dim)', padding: '16px 20px' }}>
-                <h6 className="admin-card-title"><i className="bi bi-card-image" style={{ color: '#f26522' }} /> Member Identity Card</h6>
+                <h6 className="admin-card-title"><i className="bi bi-card-image" style={{ color: '#1E3A8A' }} /> Member Identity Card</h6>
               </div>
               <div style={{ padding: '20px', display: 'flex', flexDirection: 'column', alignItems: 'center', gap: 16 }}>
                 <CardPreviewIframe ref={cardPreviewRef} cardData={v} width={300} />
@@ -460,7 +460,7 @@ export default function GeneratedVoterDetailPage() {
           <div className="admin-card" style={{ margin: 0 }}>
             <div className="admin-card-header" style={{ borderBottom: '1px solid var(--border-dim)', padding: '16px 20px' }}>
               <h6 className="admin-card-title">
-                <i className="bi bi-people-fill" style={{ color: '#f26522' }} /> Referred Members ({referred.length})
+                <i className="bi bi-people-fill" style={{ color: '#1E3A8A' }} /> Referred Members ({referred.length})
               </h6>
             </div>
             <div style={{ padding: 0 }}>

@@ -1,17 +1,42 @@
 import React, { useRef, useEffect, useState } from 'react'
 
-export const CardPreviewIframe = React.forwardRef(({ cardData, width = 340 }, ref) => {
+export const CardPreviewIframe = React.forwardRef(({ cardData, width = 340, showDownloadIcon = false, onCardClick = null }, ref) => {
   const iframeRef = useRef(null)
   const [loading, setLoading] = useState(true)
+  const [downloading, setDownloading] = useState(false)
 
   useEffect(() => {
     setLoading(true)
   }, [cardData])
 
-  const download = () => {
-    const iframe = iframeRef.current
-    if (iframe && iframe.contentWindow && typeof iframe.contentWindow.downloadPNG === 'function') {
-      iframe.contentWindow.downloadPNG()
+  const download = async () => {
+    const cardUrl = cardData?.combined_url || cardData?.card_url || ''
+    if (cardUrl && cardUrl.startsWith('http')) {
+      const downloadUrl = cardUrl.includes('/upload/')
+        ? cardUrl.replace('/upload/', '/upload/fl_attachment/')
+        : cardUrl
+      
+      const a = document.createElement('a')
+      a.href = downloadUrl
+      a.download = `BJP_Card_${cardData?.epic_no || cardData?.EPIC_NO || 'member'}.png`
+      a.target = '_blank'
+      document.body.appendChild(a)
+      a.click()
+      document.body.removeChild(a)
+      return
+    }
+
+    if (downloading) return
+    setDownloading(true)
+    try {
+      const iframe = iframeRef.current
+      if (iframe && iframe.contentWindow && typeof iframe.contentWindow.downloadPNG === 'function') {
+        await iframe.contentWindow.downloadPNG()
+      }
+    } catch (e) {
+      console.error('Download error:', e)
+    } finally {
+      setDownloading(false)
     }
   }
 
@@ -113,7 +138,7 @@ export const CardPreviewIframe = React.forwardRef(({ cardData, width = 340 }, re
         iframe.contentWindow.generate()
       }
 
-      // Hide profile icon, NAME label, and colon for the first field row, and let the name slide left
+      // Hide profile icon, NAME label, and colon for the first field row
       const firstRow = doc.querySelector('.fields .field-row')
       if (firstRow) {
         const icon = firstRow.querySelector('.field-icon')
@@ -132,6 +157,12 @@ export const CardPreviewIframe = React.forwardRef(({ cardData, width = 340 }, re
     }
   }
 
+  useEffect(() => {
+    if (iframeRef.current) {
+      handleIframeLoad()
+    }
+  }, [cardData])
+
   // Calculate scale based on target width (card original width is 1576)
   const scale = width / 1576
   const height = Math.round(998 * scale)
@@ -143,9 +174,41 @@ export const CardPreviewIframe = React.forwardRef(({ cardData, width = 340 }, re
       overflow: 'hidden',
       position: 'relative',
       borderRadius: '12px',
-      border: '1px solid var(--color-graphite)',
+      border: '1px solid rgba(255, 255, 255, 0.15)',
       background: '#F9F8F6',
+      boxShadow: '0 4px 16px rgba(0, 0, 0, 0.2)'
     }}>
+      {onCardClick && (
+        <div
+          role="button"
+          aria-label="Full View"
+          onClick={onCardClick}
+          style={{ position: 'absolute', inset: 0, zIndex: 11, cursor: 'pointer' }}
+        />
+      )}
+
+      {showDownloadIcon && (
+        <button
+          type="button"
+          aria-label="Download"
+          title="Download"
+          disabled={downloading}
+          onClick={(e) => { e.stopPropagation(); download() }}
+          style={{
+            position: 'absolute', top: 8, right: 8, zIndex: 12,
+            width: 34, height: 34, borderRadius: '50%',
+            border: 'none', cursor: downloading ? 'default' : 'pointer',
+            background: '#1E3A8A', color: '#fff',
+            display: 'inline-flex', alignItems: 'center', justifyContent: 'center',
+            boxShadow: '0 2px 8px rgba(0,0,0,0.3)', fontSize: 15,
+          }}
+        >
+          {downloading
+            ? <span className="spinner-border spinner-border-sm" style={{ width: 14, height: 14, borderWidth: 2 }} />
+            : <i className="bi bi-download" />}
+        </button>
+      )}
+
       {loading && (
         <div style={{
           position: 'absolute',

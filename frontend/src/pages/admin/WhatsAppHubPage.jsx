@@ -90,7 +90,7 @@ export default function WhatsAppHubPage() {
             <i className="bi bi-geo-alt-fill me-1" /> Tamil Nadu State
           </span>
           {district && (
-            <span style={{ background: 'rgba(242, 101, 34, 0.1)', color: '#f26522', border: '1px solid rgba(242, 101, 34, 0.2)', padding: '6px 14px', borderRadius: 20, fontSize: 12, fontWeight: 700 }}>
+            <span style={{ background: 'rgba(30, 58, 138, 0.1)', color: '#1E3A8A', border: '1px solid rgba(30, 58, 138, 0.2)', padding: '6px 14px', borderRadius: 20, fontSize: 12, fontWeight: 700 }}>
               District: {district}
             </span>
           )}

@@ -6,7 +6,7 @@ const router  = express.Router();
 const config  = require('../config');
 const { getDb, getVoterDb, findVoterByEpic } = require('../db');
 const { publicVerifyLimiter } = require('../middleware/rateLimiter');
-const { getPhotoPresignedUrl, getPhotoStream } = require('../services/backblazeService');
+const { getPhotoPresignedUrl, getPhotoStream, getCardPresignedUrl } = require('../services/backblazeService');
 const mockStorage = require('../services/mockStorage');
 
 // ── In-memory photo cache ─────────────────────────────────────────────
@@ -259,9 +259,11 @@ router.get('/api/card/:epicNo', async (req, res) => {
       ? (voter.VOTER_NAME || `${voter.FM_NAME_EN || ''} ${voter.LASTNAME_EN || ''}`.trim() || voter.name || '')
       : '';
 
+    const cardUrl = genDoc.card_b2_key ? await getCardPresignedUrl(genDoc.card_b2_key) : (genDoc.card_url || stat.card_url || '');
+
     return res.json({
       success:      true,
-      card_url:     genDoc.card_url     || stat.card_url     || '',
+      card_url:     cardUrl,
       back_url:     genDoc.back_url     || stat.back_url     || '',
       combined_url: '',
       photo_url:    await getPhotoPresignedUrl(genDoc.photo_url || stat.photo_url || ''),
@@ -269,9 +271,9 @@ router.get('/api/card/:epicNo', async (req, res) => {
       gen_count:    stat.count        || 0,
       name,
       epic_no:      epicNo,
-      assembly_name: voter?.ASSEMBLY_NAME || voter?.assembly_name || '',
-      district:      voter?.DISTRICT      || voter?.DISTRICT_NAME || voter?.district || '',
-      part_no:       String(voter?.PART_NO || voter?.part_no || ''),
+      assembly_name: voter?.ASSEMBLY_NAME || voter?.assembly_name || genDoc.ASSEMBLY_NAME || genDoc.assembly_name || '',
+      district:      voter?.DISTRICT      || voter?.DISTRICT_NAME || voter?.district || genDoc.DISTRICT || genDoc.district || '',
+      part_no:       String(voter?.PART_NO || voter?.part_no || genDoc.PART_NO || genDoc.part_no || ''),
       referral_link: genDoc.referral_link || '',
       referral_id:   genDoc.referral_id   || '',
     });
