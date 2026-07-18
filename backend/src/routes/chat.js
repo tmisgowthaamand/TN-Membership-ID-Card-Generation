@@ -754,17 +754,37 @@ router.post('/generate-card', chatGenerateCardLimiter, upload.single('photo'), a
       let backUrl = '';
       let combinedUrl = '';
       try {
-        const frontBuffer = await generateCard(voterData, resolvedPhotoBuffer);
-        cardUrl = await uploadCard(frontBuffer, epicNo, mobile);
+        // Render front and back cards in parallel
+        const [frontBuffer, backBuffer] = await Promise.all([
+          generateCard(voterData, resolvedPhotoBuffer),
+          generateBackCard(voterData).catch(() => null)
+        ]);
 
-        const backBuffer = await generateBackCard(voterData).catch(() => null);
+        const uploadPromises = [
+          uploadCard(frontBuffer, epicNo, mobile).then(url => { cardUrl = url; })
+        ];
+
         if (backBuffer) {
-          backUrl = await uploadBackCard(backBuffer, epicNo, mobile).catch(() => cardUrl);
-          const combinedBuffer = await generateCombinedCard(frontBuffer, backBuffer).catch(() => null);
-          if (combinedBuffer) {
-            combinedUrl = await uploadCombinedCard(combinedBuffer, epicNo, mobile).catch(() => cardUrl);
-          }
+          uploadPromises.push(
+            uploadBackCard(backBuffer, epicNo, mobile)
+              .then(url => { backUrl = url; })
+              .catch(() => { backUrl = cardUrl; })
+          );
+          
+          uploadPromises.push(
+            generateCombinedCard(frontBuffer, backBuffer)
+              .then(combinedBuffer => {
+                if (combinedBuffer) {
+                  return uploadCombinedCard(combinedBuffer, epicNo, mobile).then(url => { combinedUrl = url; });
+                }
+              })
+              .catch(err => {
+                console.error('[Combined Card] Render/upload error:', err.message);
+              })
+          );
         }
+
+        await Promise.all(uploadPromises);
       } catch (e) {
         console.error('Card rendering/upload notice:', e.message);
         const cloudName = config.cloudinary.cloudName || 'h5sacl9i';
