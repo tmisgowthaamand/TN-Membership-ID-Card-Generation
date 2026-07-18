@@ -2515,9 +2515,12 @@ function FullWhatsAppHubPanel({ defaultDistrict = '', defaultAssembly = '', onBa
               }}
             >
               <option value="">{t('All Districts (State Level)')}</option>
-              {availableDistricts.map((d) => (
-                <option key={d} value={d} style={{ background: '#222', color: '#fff' }}>{d}</option>
-              ))}
+              {availableDistricts.map((d, idx) => {
+                const val = typeof d === 'string' ? d : (d?.name || d?.DISTRICT_NAME || d?.district || String(d || idx))
+                return (
+                  <option key={`${val}-${idx}`} value={val} style={{ background: '#222', color: '#fff' }}>{val}</option>
+                )
+              })}
             </select>
           </div>
 
@@ -2541,9 +2544,12 @@ function FullWhatsAppHubPanel({ defaultDistrict = '', defaultAssembly = '', onBa
                 }}
               >
                 <option value="">{t('Select Assembly')}</option>
-                {availableAssemblies.map((a) => (
-                  <option key={a} value={a} style={{ background: '#222', color: '#fff' }}>{a}</option>
-                ))}
+                {availableAssemblies.map((a, idx) => {
+                  const val = typeof a === 'string' ? a : (a?.name || a?.ASSEMBLY_NAME || a?.name_en || String(a?.no || idx))
+                  return (
+                    <option key={`${val}-${idx}`} value={val} style={{ background: '#222', color: '#fff' }}>{val}</option>
+                  )
+                })}
               </select>
             ) : (
               <input
