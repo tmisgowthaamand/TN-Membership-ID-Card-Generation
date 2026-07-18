@@ -2437,6 +2437,161 @@ function FullProfilePanel({ epicNo, mobile, referredCount, onBack }) {
   );
 }
 
+const TN_DISTRICTS_LIST = [
+  "Ariyalur", "Chengalpattu", "Chennai", "Coimbatore", "Cuddalore", "Dharmapuri",
+  "Dindigul", "Erode", "Kallakurichi", "Kanchipuram", "Kanyakumari", "Karur",
+  "Krishnagiri", "Madurai", "Mayiladuthurai", "Nagapattinam", "Namakkal", "Nilgiris",
+  "Perambalur", "Pudukkottai", "Ramanathapuram", "Ranipet", "Salem", "Sivaganga",
+  "Tenkasi", "Thanjavur", "Theni", "Thoothukudi", "Tiruchirappalli", "Tirunelveli",
+  "Tirupathur", "Tiruppur", "Tiruvallur", "Tiruvannamalai", "Tiruvarur", "Vellore",
+  "Viluppuram", "Virudhunagar"
+]
+
+function FullWhatsAppHubPanel({ defaultDistrict = '', defaultAssembly = '', onBack }) {
+  const { t } = useLang()
+  const [district, setDistrict] = useState(defaultDistrict)
+  const [assembly, setAssembly] = useState(defaultAssembly)
+  const [districtsData, setDistrictsData] = useState({})
+
+  useEffect(() => {
+    publicApi.getDistrictsData()
+      .then((res) => {
+        if (res && res.data) setDistrictsData(res.data)
+      })
+      .catch(() => {})
+  }, [])
+
+  const availableDistricts = Object.keys(districtsData).length > 0 ? Object.keys(districtsData).sort() : TN_DISTRICTS_LIST
+  const availableAssemblies = district && districtsData[district] ? districtsData[district] : []
+
+  const locationText = assembly ? `${assembly} Assembly, ${district} District` : district ? `${district} District` : 'Tamil Nadu'
+  const messageText = `Vanakkam! I am a registered member from ${locationText}. I need assistance.`
+  const waUrl = `https://wa.me/918106811285?text=${encodeURIComponent(messageText)}`
+
+  return (
+    <FullFormPanel title="WhatsApp Hub" icon="chat-dots-fill" onBack={onBack}>
+      <div style={{ padding: '24px 16px', maxWidth: 440, margin: '0 auto', textAlign: 'center' }}>
+        <div style={{ fontSize: 52, color: '#25D366', marginBottom: 12 }}>
+          <i className="bi bi-whatsapp" />
+        </div>
+        <h3 style={{ fontSize: 18, fontWeight: 700, marginBottom: 8, color: 'var(--color-chalk)' }}>
+          {t('Constituency WhatsApp Connect')}
+        </h3>
+        <p style={{ color: 'var(--color-ash)', fontSize: 13, marginBottom: 20, lineHeight: 1.5 }}>
+          {t('Select your District & Assembly constituency to open a direct WhatsApp connection for your location.')}
+        </p>
+
+        {/* Location Dropdowns */}
+        <div style={{
+          background: 'rgba(255, 255, 255, 0.04)',
+          border: '1px solid rgba(255, 255, 255, 0.1)',
+          borderRadius: 14,
+          padding: 18,
+          marginBottom: 24,
+          display: 'flex',
+          flexDirection: 'column',
+          gap: 16,
+          textAlign: 'left'
+        }}>
+          <div>
+            <label style={{ fontSize: 12, fontWeight: 600, color: 'var(--color-chalk)', marginBottom: 6, display: 'block' }}>
+              📍 {t('Select District')}
+            </label>
+            <select
+              value={district}
+              onChange={(e) => { setDistrict(e.target.value); setAssembly(''); }}
+              style={{
+                width: '100%',
+                padding: '11px 14px',
+                borderRadius: 8,
+                background: 'rgba(0, 0, 0, 0.3)',
+                color: '#fff',
+                border: '1px solid rgba(255, 255, 255, 0.15)',
+                fontSize: 13,
+                outline: 'none'
+              }}
+            >
+              <option value="">{t('All Districts (State Level)')}</option>
+              {availableDistricts.map((d) => (
+                <option key={d} value={d} style={{ background: '#222', color: '#fff' }}>{d}</option>
+              ))}
+            </select>
+          </div>
+
+          <div>
+            <label style={{ fontSize: 12, fontWeight: 600, color: 'var(--color-chalk)', marginBottom: 6, display: 'block' }}>
+              🏛️ {t('Select Assembly Constituency')}
+            </label>
+            {availableAssemblies.length > 0 ? (
+              <select
+                value={assembly}
+                onChange={(e) => setAssembly(e.target.value)}
+                style={{
+                  width: '100%',
+                  padding: '11px 14px',
+                  borderRadius: 8,
+                  background: 'rgba(0, 0, 0, 0.3)',
+                  color: '#fff',
+                  border: '1px solid rgba(255, 255, 255, 0.15)',
+                  fontSize: 13,
+                  outline: 'none'
+                }}
+              >
+                <option value="">{t('Select Assembly')}</option>
+                {availableAssemblies.map((a) => (
+                  <option key={a} value={a} style={{ background: '#222', color: '#fff' }}>{a}</option>
+                ))}
+              </select>
+            ) : (
+              <input
+                type="text"
+                placeholder={t('Enter Assembly (e.g. Singanallur)')}
+                value={assembly}
+                onChange={(e) => setAssembly(e.target.value)}
+                style={{
+                  width: '100%',
+                  padding: '11px 14px',
+                  borderRadius: 8,
+                  background: 'rgba(0, 0, 0, 0.3)',
+                  color: '#fff',
+                  border: '1px solid rgba(255, 255, 255, 0.15)',
+                  fontSize: 13,
+                  outline: 'none'
+                }}
+              />
+            )}
+          </div>
+        </div>
+
+        {/* Dynamic WhatsApp Button */}
+        <a
+          href={waUrl}
+          target="_blank"
+          rel="noreferrer"
+          style={{
+            display: 'flex',
+            alignItems: 'center',
+            justifyContent: 'center',
+            gap: 10,
+            background: '#25D366',
+            color: '#fff',
+            padding: '14px 22px',
+            borderRadius: 10,
+            fontWeight: 700,
+            fontSize: 14,
+            textDecoration: 'none',
+            boxShadow: '0 4px 14px rgba(37,211,102,0.3)',
+            transition: 'all 0.2s ease'
+          }}
+        >
+          <i className="bi bi-whatsapp" style={{ fontSize: 20 }} />
+          <span>{t('Connect via WhatsApp')} {assembly ? `(${assembly})` : district ? `(${district})` : ''}</span>
+        </a>
+      </div>
+    </FullFormPanel>
+  )
+}
+
 function FullMyMembersPanel({ bjpCode, onBack }) {
   const { t } = useLang()
   const [root, setRoot] = useState(null)
@@ -4939,42 +5094,11 @@ export default function ChatbotPage() {
               onBack={() => setActiveView('chat')} 
             />
           ) : activeView === 'whatsapp_hub' ? (
-            <FullFormPanel title="WhatsApp Hub" icon="chat-dots-fill" onBack={() => setActiveView('chat')}>
-              <div style={{ padding: 24, textAlign: 'center' }}>
-                <div style={{ fontSize: 52, color: '#25D366', marginBottom: 12 }}>
-                  <i className="bi bi-whatsapp" />
-                </div>
-                <h3 style={{ fontSize: 18, fontWeight: 700, marginBottom: 8, color: 'var(--color-chalk)' }}>
-                  WhatsApp Official Member Channel
-                </h3>
-                <p style={{ color: 'var(--color-ash)', fontSize: 13, marginBottom: 20, maxWidth: 340, margin: '0 auto 20px', lineHeight: 1.5 }}>
-                  Connect with the official Tamil Nadu Member Platform on WhatsApp for instant updates, card downloads, and member assistance.
-                </p>
-                <div style={{ display: 'flex', flexDirection: 'column', gap: 12, maxWidth: 320, margin: '0 auto' }}>
-                  <a
-                    href="https://wa.me/918106811285?text=Vanakkam!%20I%20am%20a%20registered%20BJP%20Member."
-                    target="_blank"
-                    rel="noreferrer"
-                    style={{
-                      display: 'inline-flex',
-                      alignItems: 'center',
-                      justifyContent: 'center',
-                      gap: 8,
-                      background: '#25D366',
-                      color: '#fff',
-                      padding: '12px 24px',
-                      borderRadius: 8,
-                      fontWeight: 600,
-                      fontSize: 14,
-                      textDecoration: 'none',
-                      boxShadow: '0 4px 12px rgba(37,211,102,0.2)'
-                    }}
-                  >
-                    <i className="bi bi-whatsapp" style={{ fontSize: 18 }} /> Open Official WhatsApp
-                  </a>
-                </div>
-              </div>
-            </FullFormPanel>
+            <FullWhatsAppHubPanel
+              defaultDistrict={cardRef.current?.district || profileRef.current?.district || ''}
+              defaultAssembly={cardRef.current?.assembly_name || profileRef.current?.assembly_name || ''}
+              onBack={() => setActiveView('chat')}
+            />
           ) : (
             <div className="chatbot-container">
 
