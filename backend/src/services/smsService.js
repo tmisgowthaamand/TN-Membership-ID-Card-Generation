@@ -251,28 +251,77 @@ async function sendOtpViaBulkSms(mobile, otp) {
 }
 
 /**
- * Send OTP via BulkSMS, Twilio Verify, Twilio Messages, or 2factor.in API.
+ * Send OTP via Fast2SMS Bulk API.
+ * @param {string} mobile - 10-digit Indian mobile number
+ * @param {string} otp    - 6-digit OTP
+ * @returns {{ success: boolean, message: string }}
+ */
+async function sendOtpViaFast2Sms(mobile, otp) {
+  const { apiKey } = config.fast2sms;
+  const cleanMobile = mobile.replace(/\D/g, '').slice(-10);
+
+  const messageBody = `Your verification OTP is ${otp}. Valid for 5 minutes.`;
+
+  try {
+    const url = 'https://www.fast2sms.com/dev/bulkV2';
+    const resp = await axios.post(
+      url,
+      {
+        route: 'q',
+        message: messageBody,
+        numbers: cleanMobile
+      },
+      {
+        headers: {
+          'authorization': apiKey,
+          'Content-Type': 'application/json'
+        },
+        timeout: 15000
+      }
+    );
+
+    if (resp.status === 200 && resp.data && resp.data.return === true) {
+      console.log(`[Fast2SMS] OTP successfully sent to ...${cleanMobile.slice(-4)}`);
+      return { success: true, message: 'OTP sent successfully', sessionId: resp.data.request_id || 'fast2sms' };
+    }
+    
+    console.warn('[Fast2SMS] Unexpected response status or payload:', resp.status, resp.data);
+    return { success: false, message: resp.data?.message || 'Could not send OTP.' };
+  } catch (err) {
+    const details = err.response?.data || err.message;
+    console.error('[Fast2SMS] Send error:', details);
+    return { success: false, message: 'Could not send OTP. Please try again.' };
+  }
+}
+
+/**
+ * Send OTP via Fast2SMS, BulkSMS, Twilio Verify, Twilio Messages, or 2factor.in API.
  * @param {string} mobile - 10-digit Indian mobile number
  * @param {string} otp    - 6-digit OTP
  * @returns {{ success: boolean, message: string }}
  */
 async function sendOtp(mobile, otp) {
-  // 1. Try BulkSMS if configured
+  // 1. Try Fast2SMS if configured
+  if (config.fast2sms && config.fast2sms.apiKey) {
+    return sendOtpViaFast2Sms(mobile, otp);
+  }
+
+  // 2. Try BulkSMS if configured
   if (config.bulksms.tokenId && config.bulksms.tokenSecret) {
     return sendOtpViaBulkSms(mobile, otp);
   }
 
-  // 2. Try Twilio Verify if configured
+  // 3. Try Twilio Verify if configured
   if (config.twilio.accountSid && config.twilio.serviceSid && config.twilio.apiKey && config.twilio.apiSecret) {
     return sendOtpViaTwilioVerify(mobile);
   }
 
-  // 3. Try Twilio Standard SMS if configured
+  // 4. Try Twilio Standard SMS if configured
   if (config.twilio.accountSid && config.twilio.apiKey && config.twilio.apiSecret) {
     return sendOtpViaTwilio(mobile, otp);
   }
 
-  // 4. Fallback to 2factor.in
+  // 5. Fallback to 2factor.in
   const apiKey   = config.smsApiKey;
   const template = config.smsTemplateName;
 
@@ -314,6 +363,10 @@ async function sendOtp(mobile, otp) {
  * @returns {Promise<{ success: boolean, message: string } | null>}
  */
 async function verifyOtp(mobile, otp) {
+  if (config.fast2sms && config.fast2sms.apiKey) {
+    // With Fast2SMS, we verify locally using the MongoDB otp_hash
+    return null;
+  }
   if (config.bulksms.tokenId && config.bulksms.tokenSecret) {
     // With BulkSMS, we verify locally using the MongoDB otp_hash
     return null;

@@ -115,6 +115,10 @@ const config = {
     tokenSecret: process.env.BULKSMS_TOKEN_SECRET || '',
   },
 
+  fast2sms: {
+    apiKey: process.env.FAST2SMS_API_KEY || '',
+  },
+
   // WhatsApp Cloud API
   whatsapp: {
     verifyToken:    process.env.WHATSAPP_VERIFY_TOKEN    || '',

@@ -57,8 +57,11 @@ services:
         sync: false
       - key: BULKSMS_TOKEN_SECRET
         sync: false
+      - key: FAST2SMS_API_KEY
+        sync: false
       - key: USE_MEMORY_DB
         value: "false"
+
       - key: USE_VOTERS_ALL
         value: "true"
 
