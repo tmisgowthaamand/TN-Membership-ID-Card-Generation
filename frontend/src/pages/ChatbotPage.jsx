@@ -4806,8 +4806,7 @@ export default function ChatbotPage() {
               { icon: 'check-square-fill',   label: 'Local Body Election', action: 'local_body',   desc: 'Participate in Local Body elections' },
             ].map((item) => {
               const isComingSoon = false
-              const isWaHubLocked = item.action === 'whatsapp_hub' && volunteerStatus !== 'confirmed' && boothAgentStatus !== 'confirmed'
-              const locked = !isDone || (item.action === 'appreciation_letter' && referredCount < 5) || isWaHubLocked
+              const locked = !isDone || (item.action === 'appreciation_letter' && referredCount < 5)
               const itemHasNotif =
                 (item.action === 'volunteer' && hasVolunteerNotif) ||
                 (item.action === 'booth_agent' && hasBoothAgentNotif)
@@ -4938,54 +4937,59 @@ export default function ChatbotPage() {
           ) : activeView === 'whatsapp_hub' ? (
             <FullFormPanel title="WhatsApp Hub" icon="chat-dots-fill" onBack={() => setActiveView('chat')}>
               <div style={{ padding: 24, textAlign: 'center' }}>
-                <div style={{ fontSize: 48, color: '#25D366', marginBottom: 12 }}>
+                <div style={{ fontSize: 52, color: '#25D366', marginBottom: 12 }}>
                   <i className="bi bi-whatsapp" />
                 </div>
                 <h3 style={{ fontSize: 18, fontWeight: 700, marginBottom: 8, color: 'var(--color-chalk)' }}>
-                  {volunteerStatus === 'confirmed' || boothAgentStatus === 'confirmed'
-                    ? 'Organizer WhatsApp Hub Active'
-                    : 'WhatsApp Hub Locked'}
+                  WhatsApp Official Member Channel
                 </h3>
                 <p style={{ color: 'var(--color-ash)', fontSize: 13, marginBottom: 20, maxWidth: 340, margin: '0 auto 20px', lineHeight: 1.5 }}>
-                  {volunteerStatus === 'confirmed' || boothAgentStatus === 'confirmed'
-                    ? 'Welcome Organizer! Access direct constituency broadcasts, voter communication, and member management.'
-                    : 'The WhatsApp Hub is exclusive for confirmed Booth Agents & Assembly Organizers. Apply below to unlock access.'}
+                  Connect with the official Tamil Nadu Member Platform on WhatsApp for instant updates, card downloads, and member assistance.
                 </p>
-                {volunteerStatus !== 'confirmed' && boothAgentStatus !== 'confirmed' ? (
-                  <button
-                    onClick={() => setActiveView('volunteer')}
+                <div style={{ display: 'flex', flexDirection: 'column', gap: 12, maxWidth: 320, margin: '0 auto' }}>
+                  <a
+                    href="https://wa.me/918106811285?text=Vanakkam!%20I%20am%20a%20registered%20BJP%20Member."
+                    target="_blank"
+                    rel="noreferrer"
                     style={{
-                      background: 'var(--color-saffron-pulse)',
+                      display: 'inline-flex',
+                      alignItems: 'center',
+                      justifyContent: 'center',
+                      gap: 8,
+                      background: '#25D366',
                       color: '#fff',
-                      border: 'none',
-                      padding: '10px 24px',
+                      padding: '12px 24px',
                       borderRadius: 8,
                       fontWeight: 600,
                       fontSize: 14,
-                      cursor: 'pointer'
+                      textDecoration: 'none',
+                      boxShadow: '0 4px 12px rgba(37,211,102,0.2)'
                     }}
                   >
-                    Apply to be an Organizer
-                  </button>
-                ) : (
+                    <i className="bi bi-whatsapp" style={{ fontSize: 18 }} /> Open Official WhatsApp
+                  </a>
                   <a
                     href="/admin"
                     target="_blank"
                     rel="noreferrer"
                     style={{
-                      display: 'inline-block',
-                      background: '#25D366',
-                      color: '#fff',
-                      padding: '10px 24px',
+                      display: 'inline-flex',
+                      alignItems: 'center',
+                      justifyContent: 'center',
+                      gap: 8,
+                      background: 'rgba(255,255,255,0.06)',
+                      color: 'var(--color-chalk)',
+                      border: '1px solid rgba(255,255,255,0.15)',
+                      padding: '10px 20px',
                       borderRadius: 8,
                       fontWeight: 600,
-                      fontSize: 14,
+                      fontSize: 13,
                       textDecoration: 'none'
                     }}
                   >
-                    Open Organizer Portal
+                    <i className="bi bi-person-badge" /> Admin / Organizer Login
                   </a>
-                )}
+                </div>
               </div>
             </FullFormPanel>
           ) : (
@@ -5284,8 +5288,7 @@ export default function ChatbotPage() {
                 { icon: 'check-square-fill',   label: 'Local Body Election', action: 'local_body',   desc: 'Participate in Local Body elections' },
               ].map((item) => {
                 const isComingSoon = false
-                const isWaHubLocked = item.action === 'whatsapp_hub' && volunteerStatus !== 'confirmed' && boothAgentStatus !== 'confirmed'
-                const isLocked = (item.action === 'appreciation_letter' && referredCount < 5) || isWaHubLocked
+                const isLocked = item.action === 'appreciation_letter' && referredCount < 5
                 const itemHasNotif =
                   (item.action === 'volunteer' && hasVolunteerNotif) ||
                   (item.action === 'booth_agent' && hasBoothAgentNotif)
