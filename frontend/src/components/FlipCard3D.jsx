@@ -123,6 +123,22 @@ export const FlipCard3D = forwardRef(function FlipCard3D(
 
   // ── Download: front (html2canvas) + back (image) side-by-side ──
   const handleDownload = async () => {
+    const cardUrl = cardData?.combined_url || cardData?.card_url || '';
+    if (cardUrl && cardUrl.startsWith('http')) {
+      const downloadUrl = cardUrl.includes('/upload/')
+        ? cardUrl.replace('/upload/', '/upload/fl_attachment/')
+        : cardUrl;
+      
+      const a = document.createElement('a');
+      a.href = downloadUrl;
+      a.download = `BJP_Card_${cardData.epic_no || cardData.EPIC_NO || 'member'}.png`;
+      a.target = '_blank';
+      document.body.appendChild(a);
+      a.click();
+      document.body.removeChild(a);
+      return;
+    }
+
     if (downloading) return
     setDownloading(true)
     try {
@@ -395,23 +411,39 @@ export const FlipCard3D = forwardRef(function FlipCard3D(
               </div>
             </div>
           )}
-          <iframe
-            ref={iframeRef}
-            src="/bjp_card_design.html?v=2"
-            title="Card Front"
-            style={{
-              position: 'absolute', left: 0, top: 0,
-              width: `${ORIG_W}px`, height: `${ORIG_H}px`,
-              border: 'none',
-              transform: `scale(${scale})`,
-              transformOrigin: 'top left',
-              pointerEvents: 'none',
-              maxWidth: 'none',
-              opacity: loading ? 0 : 1,
-              transition: 'opacity 0.3s ease'
-            }}
-            onLoad={handleIframeLoad}
-          />
+          {cardData?.card_url ? (
+            <img
+              src={cardData.card_url}
+              alt="BJP Member Card"
+              style={{
+                width: '100%',
+                height: '100%',
+                objectFit: 'contain',
+                borderRadius: 12,
+                opacity: loading ? 0 : 1,
+                transition: 'opacity 0.3s ease'
+              }}
+              onLoad={() => setLoading(false)}
+            />
+          ) : (
+            <iframe
+              ref={iframeRef}
+              src="/bjp_card_design.html?v=2"
+              title="Card Front"
+              style={{
+                position: 'absolute', left: 0, top: 0,
+                width: `${ORIG_W}px`, height: `${ORIG_H}px`,
+                border: 'none',
+                transform: `scale(${scale})`,
+                transformOrigin: 'top left',
+                pointerEvents: 'none',
+                maxWidth: 'none',
+                opacity: loading ? 0 : 1,
+                transition: 'opacity 0.3s ease'
+              }}
+              onLoad={handleIframeLoad}
+            />
+          )}
         </div>
       </div>
 
