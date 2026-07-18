@@ -1,6 +1,9 @@
 require('dotenv').config();
 
-const nodeEnv = process.env.NODE_ENV || 'development';
+// Auto-detect Render hosting — Render sets process.env.RENDER automatically.
+// This avoids needing to manually set NODE_ENV or BASE_URL on Render.
+const IS_RENDER = !!process.env.RENDER;
+const nodeEnv = process.env.NODE_ENV || (IS_RENDER ? 'production' : 'development');
 
 // ── Admin access: OTP login restricted to a whitelist of mobile numbers ──
 // Set ADMIN_ALLOWED_MOBILES as a comma-separated list of 10-digit numbers.
@@ -52,8 +55,10 @@ if (isTwilioVerify) {
   console.log('[Startup] 2factor.in SMS gateway is ACTIVE');
 }
 
+const RENDER_URL = 'https://tn-membership-id-card-generation.onrender.com';
+
 const config = {
-  port:    process.env.PORT    || 5000,
+  port:    process.env.PORT    || (IS_RENDER ? 10000 : 5000),
   nodeEnv,
 
   // ── DB2: App data (Atlas) — writes happen here ──────────────────
@@ -122,7 +127,7 @@ const config = {
     },
   },
 
-  baseUrl:       process.env.BASE_URL       || 'https://tn-membership-id-card-generation.onrender.com',
+  baseUrl:       process.env.BASE_URL       || (IS_RENDER ? RENDER_URL : 'http://localhost:5000'),
   frontendUrl:   process.env.FRONTEND_URL   || 'https://we-the-leader.vercel.app',
   // Comma-separated list of extra allowed CORS origins e.g. preview deploy URLs
   extraOrigins:  process.env.EXTRA_ORIGINS
