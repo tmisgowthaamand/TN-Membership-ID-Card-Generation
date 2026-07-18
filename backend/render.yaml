@@ -1,0 +1,59 @@
+services:
+  - type: web
+    name: tamilnadu-bjp-backend
+    runtime: node
+    region: singapore
+    plan: free
+    buildCommand: npm install
+    startCommand: node src/index.js
+    envVars:
+      - key: NODE_ENV
+        value: production
+      - key: PORT
+        value: 10000
+      - key: MONGO_URI
+        sync: false
+      - key: MONGO_DB
+        value: wetheleaders
+      - key: MONGO_VOTER_URL
+        sync: false
+      - key: MONGO_VOTER_DB_NAME
+        value: wetheleaders
+      - key: SESSION_SECRET
+        sync: false
+      - key: BASE_URL
+        sync: false
+      - key: FRONTEND_URL
+        sync: false
+      - key: EXTRA_ORIGINS
+        sync: false
+      - key: ADMIN_USERNAME
+        sync: false
+      - key: ADMIN_PASSWORD
+        sync: false
+      - key: ADMIN_ALLOWED_MOBILES
+        sync: false
+      - key: CLOUDINARY_CLOUD_NAME
+        value: h5sacl9i
+      - key: CLOUDINARY_API_KEY
+        sync: false
+      - key: CLOUDINARY_API_SECRET
+        sync: false
+      - key: CLOUDINARY_PHOTO_FOLDER
+        value: member_photos
+      - key: CLOUDINARY_CARDS_FOLDER
+        value: generated_cards
+      - key: DISABLE_CLOUDINARY
+        value: "false"
+      - key: TWILIO_ACCOUNT_SID
+        sync: false
+      - key: TWILIO_API_KEY
+        sync: false
+      - key: TWILIO_API_SECRET
+        sync: false
+      - key: TWILIO_VERIFY_SERVICE_SID
+        sync: false
+      - key: USE_MEMORY_DB
+        value: "false"
+      - key: USE_VOTERS_ALL
+        value: "true"

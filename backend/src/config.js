@@ -1,0 +1,134 @@
+require('dotenv').config();
+
+const nodeEnv = process.env.NODE_ENV || 'development';
+
+// ── Admin access: OTP login restricted to a whitelist of mobile numbers ──
+// Set ADMIN_ALLOWED_MOBILES as a comma-separated list of 10-digit numbers.
+// Only these numbers can receive an admin login OTP.
+const adminAllowedMobiles = (process.env.ADMIN_ALLOWED_MOBILES || '')
+  .split(',')
+  .map((s) => s.replace(/\D/g, '').slice(-10))
+  .filter((m) => /^\d{10}$/.test(m));
+
+if (nodeEnv === 'production' && (!process.env.ADMIN_USERNAME || !process.env.ADMIN_PASSWORD)) {
+  throw new Error('ADMIN_USERNAME and ADMIN_PASSWORD must be configured in .env for production admin panel access');
+}
+
+if (!process.env.SESSION_SECRET || process.env.SESSION_SECRET.length < 32) {
+  throw new Error('SESSION_SECRET must be set and at least 32 characters long');
+}
+
+if (nodeEnv === 'production' && !process.env.BASE_URL) {
+  throw new Error('BASE_URL must be set in production');
+}
+
+// B2 credentials are optional — Cloudinary is now used for photo/card uploads.
+if (!process.env.B2_KEY_ID || !process.env.B2_APP_KEY || !process.env.B2_BUCKET_NAME) {
+  if (nodeEnv === 'production') {
+    console.warn('[Startup] B2 credentials not set — Cloudinary will handle all photo uploads.');
+  }
+}
+
+// FIX-14: surface a missing SMS key loudly at startup.
+// NOTE: this is a WARNING (not a hard throw) on purpose — the web flow has no
+// OTP step yet, so SMS is not required to run today, and a throw would crash
+// the live site. Once OTP login goes live (registration depends on SMS
+// delivery), promote this to a hard throw so a missing/rotated key fails the
+// deploy immediately instead of silently blocking every registration.
+const hasTwilio = process.env.TWILIO_ACCOUNT_SID && process.env.TWILIO_API_KEY && process.env.TWILIO_API_SECRET;
+const isTwilioVerify = hasTwilio && process.env.TWILIO_VERIFY_SERVICE_SID;
+
+if (isTwilioVerify) {
+  console.log(`[Startup] Twilio Verify gateway is ACTIVE (Service SID: ...${process.env.TWILIO_VERIFY_SERVICE_SID.slice(-4)})`);
+} else if (hasTwilio) {
+  console.log('[Startup] Twilio SMS gateway is ACTIVE');
+} else if (!process.env.SMS_API_KEY) {
+  if (nodeEnv === 'production') {
+    console.warn('[Startup] ⚠️  SMS credentials (Twilio or 2factor) are NOT set — OTP delivery will fail.');
+  } else {
+    console.warn('[Startup] SMS credentials not set — OTP sends will use the dev mock.');
+  }
+} else {
+  console.log('[Startup] 2factor.in SMS gateway is ACTIVE');
+}
+
+const config = {
+  port:    process.env.PORT    || 5000,
+  nodeEnv,
+
+  // ── DB2: App data (Atlas) — writes happen here ──────────────────
+  mongoUri: process.env.MONGO_URI || '',
+  mongoDb:  process.env.MONGO_DB  || 'bjptamilnadu',
+
+  // ── DB1: Voter roll (DigitalOcean) — READ-ONLY ──────────────────
+  mongoVoterUrl:    process.env.MONGO_VOTER_URL    || '',
+  mongoVoterDbName: process.env.MONGO_VOTER_DB_NAME || 'voter_db',
+
+  // ── Redis (shared cache, rate limiting, sessions) ───────────────
+  // If unset, the app falls back to in-memory cache + MongoDB sessions
+  // (correct for a single instance only).
+  redisUrl: process.env.REDIS_URL || '',
+
+  cloudinary: {
+    cloudName:   process.env.CLOUDINARY_CLOUD_NAME   || 'h5sacl9i',
+    apiKey:      process.env.CLOUDINARY_API_KEY      || '869769232798729',
+    apiSecret:   process.env.CLOUDINARY_API_SECRET   || 'M3Khri0qT2aQXN7Ha9SGgL-Mjy8',
+    photoFolder: process.env.CLOUDINARY_PHOTO_FOLDER || 'member_photos',
+    cardsFolder: process.env.CLOUDINARY_CARDS_FOLDER || 'generated_cards',
+  },
+
+  b2: {
+    endpoint:   process.env.B2_ENDPOINT     || 's3.us-east-005.backblazeb2.com',
+    keyId:      process.env.B2_KEY_ID       || '',
+    appKey:     process.env.B2_APP_KEY      || '',
+    bucketName: process.env.B2_BUCKET_NAME  || 'bjpmembers',
+    region:     process.env.B2_REGION       || 'us-east-005',
+  },
+
+  admin: {
+    username: process.env.ADMIN_USERNAME || 'bjp',
+    password: process.env.ADMIN_PASSWORD || 'tamilnadu@2026',
+    allowedMobiles: adminAllowedMobiles,
+  },
+
+  smsApiKey:          process.env.SMS_API_KEY          || '',
+  // 2factor approved OTP template name (e.g. 'OTP1', sender id SULTNE).
+  // When set, OTP SMS is sent using this DLT-approved template.
+  smsTemplateName:    process.env.SMS_TEMPLATE_NAME     || '',
+  whatsappChannelUrl: process.env.WHATSAPP_CHANNEL_URL || '',
+
+  twilio: {
+    accountSid: process.env.TWILIO_ACCOUNT_SID || '',
+    apiKey:     process.env.TWILIO_API_KEY     || '',
+    apiSecret:  process.env.TWILIO_API_SECRET  || '',
+    from:       process.env.TWILIO_FROM        || '',
+    serviceSid: process.env.TWILIO_VERIFY_SERVICE_SID || '',
+  },
+
+  // WhatsApp Cloud API
+  whatsapp: {
+    verifyToken:    process.env.WHATSAPP_VERIFY_TOKEN    || '',
+    appId:          process.env.WHATSAPP_APP_ID           || '',
+    appSecret:      process.env.WHATSAPP_APP_SECRET       || '',
+    accessToken:    process.env.WHATSAPP_ACCESS_TOKEN     || '',
+    phoneNumberId:  process.env.WHATSAPP_PHONE_NUMBER_ID  || '',
+    wabaId:         process.env.WHATSAPP_WABA_ID          || '',
+    // RSA private key for decrypting WhatsApp Flow requests (optional)
+    // Set WHATSAPP_FLOW_PRIVATE_KEY in .env (newlines as \n)
+    flowPrivateKey: process.env.WHATSAPP_FLOW_PRIVATE_KEY || '',
+    flows: {
+      registrationId: process.env.WHATSAPP_FLOW_REGISTRATION_ID || '',
+      loginId:        process.env.WHATSAPP_FLOW_LOGIN_ID        || '',
+    },
+  },
+
+  baseUrl:       process.env.BASE_URL       || 'http://localhost:5000',
+  frontendUrl:   process.env.FRONTEND_URL   || 'https://we-the-leader.vercel.app',
+  // Comma-separated list of extra allowed CORS origins e.g. preview deploy URLs
+  extraOrigins:  process.env.EXTRA_ORIGINS
+    ? process.env.EXTRA_ORIGINS.split(',').map(s => s.trim()).filter(Boolean)
+    : [],
+  sessionSecret: process.env.SESSION_SECRET,
+};
+
+module.exports = config;

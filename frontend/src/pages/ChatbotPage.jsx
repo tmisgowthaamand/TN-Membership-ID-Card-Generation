@@ -1,0 +1,5488 @@
+import React, { useState, useEffect, useRef, useCallback } from 'react'
+import QRCode from 'qrcode'
+import { useNavigate } from 'react-router-dom'
+import Cropper from 'cropperjs'
+import 'cropperjs/dist/cropper.css'
+import { chat, publicApi } from '../api'
+import { FlipCard3D } from '../components/FlipCard3D'
+import html2canvas from 'html2canvas'
+import '../styles/chatbot.css'
+import { useLang } from '../i18n/LanguageContext'
+
+// ── Read referral params from landing URL (?ref=BJP-XXXX&rid=REF-XXXX)
+const getReferralParams = () => {
+  try {
+    const p = new URLSearchParams(window.location.search)
+    let ref = (p.get('ref') || '').trim().toUpperCase()
+    let rid = (p.get('rid') || '').trim().toUpperCase()
+    // Validate format before using
+    if (/^(BJP|BJP)-[0-9A-F]{8}$/.test(ref) && /^REF-[0-9A-F]{8}$/.test(rid)) {
+      return { ref, rid }
+    }
+
+    // Check localStorage as fallback
+    const stored = localStorage.getItem('bjp_referral')
+    if (stored) {
+      const data = JSON.parse(stored)
+      // Check if it's less than 24 hours old
+      if (data && Date.now() - data.timestamp < 24 * 60 * 60 * 1000) {
+        const storedRef = (data.bjpCode || '').trim().toUpperCase()
+        const storedRid = (data.referralId || '').trim().toUpperCase()
+        if (/^(BJP|BJP)-[0-9A-F]{8}$/.test(storedRef) && /^REF-[0-9A-F]{8}$/.test(storedRid)) {
+          return { ref: storedRef, rid: storedRid }
+        }
+      }
+    }
+  } catch { /* ignore */ }
+  return { ref: '', rid: '' }
+}
+
+// ── True only when a valid referral is present in the CURRENT URL.
+// (No localStorage fallback — used to decide the "rescan the QR" warning so a
+// plain revisit by an existing member doesn't falsely trigger it.)
+const hasReferralInUrl = () => {
+  try {
+    const p = new URLSearchParams(window.location.search)
+    const ref = (p.get('ref') || '').trim().toUpperCase()
+    const rid = (p.get('rid') || '').trim().toUpperCase()
+    return /^BJP-[0-9A-F]{8}$/.test(ref) && /^REF-[0-9A-F]{8}$/.test(rid)
+  } catch {
+    return false
+  }
+}
+
+// ── Constants ──────────────────────────────────────────────
+const HIDE_WELCOME_LETTER = true
+const HIDE_APPRECIATION_LETTER = true
+
+const S = {
+  WELCOME:       'WELCOME',
+  AWAIT_MOBILE:  'AWAIT_MOBILE',
+  AWAIT_OTP:     'AWAIT_OTP',
+  AWAIT_EPIC:    'AWAIT_EPIC',
+  CONFIRM:       'CONFIRM',
+  AWAIT_PHOTO:   'AWAIT_PHOTO',
+  GENERATING:    'GENERATING',
+  DONE:          'DONE',
+  AWAIT_BOOTH_NO:'AWAIT_BOOTH_NO',
+}
+
+const CACHE_KEY = 'bjp_card_cache'
+// Rolling 1-hour session: the cached login is valid for 1h from the LAST
+// activity. Every user action refreshes `timestamp` (see touchCache), so an
+// active member stays logged in; 1h of inactivity expires it (auto-logout).
+const CACHE_TTL = 60 * 60 * 1000   // 1 hour
+
+const getCache = () => {
+  try {
+    const raw = localStorage.getItem(CACHE_KEY)
+    if (!raw) return null
+    const data = JSON.parse(raw)
+    if (Date.now() - data.timestamp > CACHE_TTL) {
+      localStorage.removeItem(CACHE_KEY)
+      return null
+    }
+    return data
+  } catch { return null }
+}
+
+const saveCache = (card, profile) =>
+  localStorage.setItem(CACHE_KEY, JSON.stringify({ card, profile, timestamp: Date.now() }))
+
+// Refresh the last-active timestamp (sliding expiry) without touching the data.
+const touchCache = () => {
+  try {
+    const raw = localStorage.getItem(CACHE_KEY)
+    if (!raw) return
+    const data = JSON.parse(raw)
+    data.timestamp = Date.now()
+    localStorage.setItem(CACHE_KEY, JSON.stringify(data))
+  } catch { /* ignore */ }
+}
+
+const clearCache = () => localStorage.removeItem(CACHE_KEY)
+
+const maskMobile = (m) => m ? m.slice(0, 5) + 'XXXXX' : ''
+
+const getDownloadUrl = (url, epicNo) => {
+  if (url && url.includes('/upload/')) {
+    return url.replace('/upload/', `/upload/fl_attachment:${epicNo}_BJP_Card/`)
+  }
+  return url
+}
+
+const sleep = (ms) => new Promise((r) => setTimeout(r, ms))
+
+const fmtTime = (d) =>
+  d ? new Date(d).toLocaleTimeString([], { hour: '2-digit', minute: '2-digit' }) : ''
+
+const getActiveStep = (chatState) => {
+  switch (chatState) {
+    case 'WELCOME':
+    case 'AWAIT_MOBILE':
+      return 1
+    case 'AWAIT_EPIC':
+    case 'CONFIRM':
+      return 2
+    case 'AWAIT_PHOTO':
+    case 'GENERATING':
+      return 3
+    case 'DONE':
+      return 4
+    default:
+      return 1
+  }
+}
+
+// ── Crop Modal ──────────────────────────────────────────────
+function CropModal({ src, onCrop, onCancel }) {
+  const { t } = useLang()
+  const imgRef = useRef(null)
+  const cropperRef = useRef(null)
+
+  useEffect(() => {
+    if (!imgRef.current || !src) return
+    const img = imgRef.current
+
+    const initCropper = () => {
+      cropperRef.current = new Cropper(img, {
+        aspectRatio: 268 / 384,
+        viewMode: 1,
+        dragMode: 'move',
+        autoCropArea: 0.9,
+        responsive: true,
+        background: false,
+        guides: true,
+        center: true,
+      })
+    }
+
+    if (img.complete) {
+      initCropper()
+    } else {
+      img.onload = initCropper
+    }
+
+    return () => {
+      cropperRef.current?.destroy()
+      cropperRef.current = null
+    }
+  }, [src])
+
+  const handleCrop = () => {
+    if (!cropperRef.current) return
+    cropperRef.current.getCroppedCanvas({ width: 536, height: 768, imageSmoothingQuality: 'high' })
+      .toBlob((blob) => onCrop(blob), 'image/jpeg', 0.93)
+  }
+
+  return (
+    <div className="crop-overlay">
+      <div className="crop-modal">
+        <div className="crop-modal-header">
+          <h5><i className="bi bi-crop" /> {t('Crop Your Photo')}</h5>
+          <button className="crop-close-btn" onClick={onCancel}><i className="bi bi-x-lg" /></button>
+        </div>
+        <div className="crop-modal-body">
+          <img ref={imgRef} src={src} alt="Crop preview" style={{ display: 'block', maxWidth: '100%' }} />
+        </div>
+        <div className="crop-modal-footer">
+          <span className="crop-hint"><i className="bi bi-info-circle" /> {t('Drag to adjust. Aspect ratio 2.68:3.84.')}</span>
+          <button className="btn btn-sm btn-outline-secondary" onClick={onCancel}>{t('Cancel')}</button>
+          <button className="btn btn-sm btn-danger" onClick={handleCrop}>
+            <i className="bi bi-check-lg" /> {t('Use Photo')}
+          </button>
+        </div>
+      </div>
+    </div>
+  )
+}
+
+// ── Message renderers ───────────────────────────────────────
+function WelcomeBannerMsg({ onStart }) {
+  const { t } = useLang()
+  return (
+    <div className="welcome-banner">
+      <img src="/banner.png" alt="Organization Logo" className="banner-img"
+        loading="lazy"
+        onError={(e) => { e.target.style.display = 'none' }} />
+      <div className="banner-content">
+        <h2>{t("Leading political organization driving community welfare and civic progress.")}</h2>
+        <p>{t("You are joining the leading political organization. Click below to generate your personalized Member Card.")}</p>
+        <button className="btn-start" onClick={onStart}>
+          <i className="bi bi-play-circle-fill" /> {t('Start')}
+        </button>
+      </div>
+    </div>
+  )
+}
+
+function VoterCardMsg({ voter, isLatest, chatState, onConfirm, onRetry, disabled }) {
+  const { t } = useLang()
+  const v = voter || {}
+  const rows = [
+    { label: 'Name',         value: v.name || v.Name || v.voter_name },
+    { label: "Father's Name", value: v.father_name || v.FatherName || v.RelationName },
+    { label: 'EPIC No',       value: v.epic_no || v.EpicNo || v.EPIC_NO },
+    { label: 'Age / Gender',  value: [v.age || v.Age, v.gender || v.Gender].filter(Boolean).join(' / ') || undefined },
+    { label: 'Assembly',      value: v.assembly || v.AssemblyName || v.assembly_name },
+    { label: 'District',      value: v.district || v.DistrictName || v.district_name },
+    { label: 'Part No',       value: v.part_no || v.PartNo },
+    { label: 'Serial No',     value: v.serial_no || v.SlNo },
+  ].filter((r) => r.value)
+
+  const showButtons = isLatest && chatState === 'CONFIRM'
+
+  return (
+    <div className="voter-details-card">
+      <div className="vdc-header">
+        <i className="bi bi-person-badge" /> {t('Voter Details')}
+      </div>
+      <div className="vdc-body">
+        {rows.map((r) => (
+          <div className="vdc-row" key={r.label}>
+            <span className="vdc-label">{t(r.label)}</span>
+            <span className="vdc-value">{r.value}</span>
+          </div>
+        ))}
+      </div>
+      {showButtons && (
+        <div className="interactive-buttons">
+          <button className="interactive-btn" onClick={onConfirm} disabled={disabled}>
+            <i className="bi bi-check-circle-fill" /> {t('Confirm Details')}
+          </button>
+          <button className="interactive-btn" onClick={onRetry} disabled={disabled} style={{ color: 'var(--color-secondary)' }}>
+            <i className="bi bi-arrow-counterclockwise" /> {t('Re-enter ID')}
+          </button>
+        </div>
+      )}
+    </div>
+  )
+}
+
+// ── Referral Link Message ────────────────────────────────────
+function FullReferralPanel({ link, onBack }) {
+  const { t } = useLang()
+  const canvasRef = useRef(null)
+  const [copied, setCopied] = useState(false)
+  const [qrReady, setQrReady] = useState(false)
+
+  useEffect(() => {
+    if (!link || !canvasRef.current) return
+    const canvas = canvasRef.current
+    const size = 280
+    QRCode.toCanvas(canvas, link, {
+      width: size,
+      margin: 2,
+      color: { dark: '#000000', light: '#ffffff' },
+      errorCorrectionLevel: 'H'
+    }, (err) => {
+      if (err) return
+      // Overlay BJP logo in center
+      const ctx = canvas.getContext('2d')
+      const img = new Image()
+      img.src = '/org_logo.svg'
+      img.onload = () => {
+        const logoSize = size * 0.22
+        const logoX = (size - logoSize) / 2
+        const logoY = (size - logoSize) / 2
+        // White background circle
+        ctx.save()
+        ctx.beginPath()
+        ctx.arc(size / 2, size / 2, logoSize * 0.62, 0, Math.PI * 2)
+        ctx.fillStyle = '#ffffff'
+        ctx.fill()
+        ctx.restore()
+        ctx.drawImage(img, logoX, logoY, logoSize, logoSize)
+        setQrReady(true)
+      }
+      img.onerror = () => setQrReady(true)
+    })
+  }, [link])
+
+  const handleCopyLink = () => {
+    navigator.clipboard?.writeText(link).catch(() => {})
+    setCopied(true)
+    setTimeout(() => setCopied(false), 2000)
+  }
+
+  const handleShareWhatsApp = () => {
+    if (!link || !canvasRef.current) return
+    // WhatsApp bold markdown: *text*
+    const shareText = `${t('*Join our Organization!*')}\n\n${t('*Generate your free Digital Member ID Card here:*')}\n${link}`
+    // Try Web Share API (mobile) — sends QR image + text as a single share
+    if (navigator.canShare && canvasRef.current) {
+      canvasRef.current.toBlob((blob) => {
+        const file = new File([blob], 'member-referral-qr.png', { type: 'image/png' })
+        if (navigator.canShare({ files: [file] })) {
+          navigator.share({
+            title: t('Join our Organization!'),
+            text: shareText,
+            files: [file]
+          }).catch(() => {
+            // Fallback: open WhatsApp text-only
+            window.open(`https://wa.me/?text=${encodeURIComponent(shareText)}`, '_blank')
+          })
+          return
+        }
+        // Device supports share but not file share — text only
+        window.open(`https://wa.me/?text=${encodeURIComponent(shareText)}`, '_blank')
+      }, 'image/png', 1.0)
+    } else {
+      // Desktop fallback — open WhatsApp with text+link
+      window.open(`https://wa.me/?text=${encodeURIComponent(shareText)}`, '_blank')
+    }
+  }
+
+  const handleDownloadQR = () => {
+    if (!canvasRef.current) return
+    const filename = 'bjp-referral-qr.png'
+    canvasRef.current.toBlob((blob) => {
+      if (!blob) return
+      const isIOS = /iP(hone|ad|od)/.test(navigator.userAgent) ||
+                    (navigator.platform === 'MacIntel' && navigator.maxTouchPoints > 1)
+      if (isIOS) {
+        // WebKit ignores <a download> — share (Save to Photos) or open for long-press save
+        const file = new File([blob], filename, { type: 'image/png' })
+        if (navigator.canShare && navigator.canShare({ files: [file] })) {
+          navigator.share({ files: [file], title: 'BJP Referral QR' }).catch((e) => {
+            if (e && e.name === 'AbortError') return
+            const u = URL.createObjectURL(blob)
+            window.open(u, '_blank')
+            setTimeout(() => URL.revokeObjectURL(u), 15000)
+          })
+          return
+        }
+        const u = URL.createObjectURL(blob)
+        window.open(u, '_blank')
+        setTimeout(() => URL.revokeObjectURL(u), 15000)
+        return
+      }
+      const url = URL.createObjectURL(blob)
+      const a   = document.createElement('a')
+      a.href     = url
+      a.download = filename
+      document.body.appendChild(a)
+      a.click()
+      document.body.removeChild(a)
+      setTimeout(() => URL.revokeObjectURL(url), 1000)
+    }, 'image/png', 1.0)
+  }
+
+  return (
+    <div className="chatbot-container brochure-panel">
+      <header className="brochure-header">
+        <div className="brochure-title" style={{ display: 'flex', alignItems: 'center', gap: 10 }}>
+          <button
+            onClick={onBack}
+            style={{ background: 'none', border: 'none', color: 'var(--color-ash)', cursor: 'pointer', padding: '4px 8px 4px 0', fontSize: '18px', display: 'flex', alignItems: 'center', transition: 'color 0.15s' }}
+            onMouseEnter={(e) => e.currentTarget.style.color = 'var(--color-chalk)'}
+            onMouseLeave={(e) => e.currentTarget.style.color = 'var(--color-ash)'}
+            aria-label="Back"
+          >
+            <i className="bi bi-chevron-left" />
+          </button>
+          <i className="bi bi-link-45deg brochure-title-orange" />
+          <span>{t('Referral Link')}</span>
+        </div>
+      </header>
+
+      <div className="brochure-content" style={{ display: 'flex', flexDirection: 'column', alignItems: 'center', justifyContent: 'flex-start', padding: '24px 20px', gap: 20 }}>
+        {link ? (
+          <>
+            {/* QR Code Canvas */}
+            <div style={{ position: 'relative', display: 'inline-block' }}>
+              <div style={{
+                background: '#fff',
+                borderRadius: 16,
+                padding: 12,
+                boxShadow: '0 4px 24px rgba(0,0,0,0.13)',
+                display: 'inline-block'
+              }}>
+                <canvas ref={canvasRef} style={{ display: 'block', borderRadius: 8 }} />
+              </div>
+              {!qrReady && (
+                <div style={{ position: 'absolute', inset: 0, display: 'flex', alignItems: 'center', justifyContent: 'center' }}>
+                  <div style={{ width: 28, height: 28, border: '3px solid rgba(30,58,138,0.2)', borderTopColor: '#1E3A8A', borderRadius: '50%', animation: 'spin 1s linear infinite' }} />
+                </div>
+              )}
+            </div>
+
+            {/* Caption */}
+            <p style={{ fontSize: 13, color: 'var(--color-ash)', textAlign: 'center', margin: 0, lineHeight: 1.5 }}>
+              <i className="bi bi-qr-code me-1" style={{ color: '#1E3A8A' }} />
+              {t('Scan this QR to join our Organization')}
+            </p>
+
+            {/* Link Box */}
+            <div style={{
+              background: 'rgba(255,255,255,0.07)',
+              border: '1px solid rgba(255,255,255,0.12)',
+              borderRadius: 10,
+              padding: '10px 14px',
+              fontSize: 12,
+              color: 'var(--color-chalk)',
+              wordBreak: 'break-all',
+              width: '100%',
+              maxWidth: 320,
+              textAlign: 'center'
+            }}>
+              {link}
+            </div>
+
+            {/* Action Buttons */}
+            <div style={{ display: 'flex', flexDirection: 'column', gap: 10, width: '100%', maxWidth: 320 }}>
+              <button
+                onClick={handleCopyLink}
+                style={{ display: 'flex', alignItems: 'center', justifyContent: 'center', gap: 8, padding: '12px', borderRadius: 10, border: '1px solid rgba(255,255,255,0.15)', background: copied ? 'rgba(46,204,113,0.15)' : 'rgba(255,255,255,0.07)', color: copied ? '#2ecc71' : 'var(--color-chalk)', fontSize: 14, fontWeight: 600, cursor: 'pointer', transition: 'all 0.2s' }}
+              >
+                <i className={`bi bi-${copied ? 'check-lg' : 'clipboard'}`} />
+                {copied ? t('Copied!') : t('Copy Link')}
+              </button>
+              <button
+                onClick={handleShareWhatsApp}
+                style={{ display: 'flex', alignItems: 'center', justifyContent: 'center', gap: 8, padding: '12px', borderRadius: 10, border: 'none', background: '#25d366', color: '#fff', fontSize: 14, fontWeight: 600, cursor: 'pointer' }}
+              >
+                <i className="bi bi-whatsapp" /> {t('Share on WhatsApp')}
+              </button>
+              <button
+                onClick={handleDownloadQR}
+                style={{ display: 'flex', alignItems: 'center', justifyContent: 'center', gap: 8, padding: '12px', borderRadius: 10, border: '1px solid rgba(30,58,138,0.4)', background: 'rgba(30,58,138,0.08)', color: '#1E3A8A', fontSize: 14, fontWeight: 600, cursor: 'pointer' }}
+              >
+                <i className="bi bi-download" /> {t('Download QR Code')}
+              </button>
+            </div>
+
+            <p style={{ fontSize: 12, color: 'var(--color-ash)', textAlign: 'center', margin: 0, lineHeight: 1.6 }}>
+              <i className="bi bi-people-fill" style={{ color: '#1E3A8A', marginRight: 4 }} />
+              <span dangerouslySetInnerHTML={{ __html: t('Everyone who joins via your link or QR appears in your *My Members* list.').replace(/\*(.*?)\*/g, '<strong style="color: var(--color-chalk)">$1</strong>') }} />
+            </p>
+          </>
+        ) : (
+          <div style={{ flex: 1, display: 'flex', alignItems: 'center', justifyContent: 'center', color: 'var(--color-ash)', fontSize: 13 }}>
+            <i className="bi bi-exclamation-circle me-2" /> {t('No referral link available.')}
+          </div>
+        )}
+      </div>
+    </div>
+  )
+}
+
+function GeneratedCardMsg({ card, isNew = false }) {  const c = card || {}
+  const [fullCardData, setFullCardData] = useState(null)
+
+  useEffect(() => {
+    const hasName = c.name || c.voter_name || c.VOTER_NAME;
+    const hasAssembly = c.assembly_name || c.assembly || c.ASSEMBLY_NAME;
+    if (hasName && hasAssembly) {
+      setFullCardData(c)
+    } else if (c.epic_no) {
+      publicApi.getCardData(c.bjp_code || c.epic_no)
+        .then((data) => setFullCardData(data))
+        .catch(() => setFullCardData(c))
+    }
+  }, [c])
+
+  return (
+    <div style={{ display: 'flex', flexDirection: 'column', alignItems: 'flex-start', gap: 8, padding: '4px 0' }}>
+      {fullCardData ? (
+        <FlipCard3D
+          cardData={fullCardData}
+          backUrl={c.back_url || fullCardData.back_url}
+          width={Math.min(310, (typeof window !== 'undefined' ? window.innerWidth : 360) - 96)}
+          autoFlip={isNew}
+          showActions={false}
+          showDownloadIcon={true}
+          onCardClick={() => window.dispatchEvent(new CustomEvent('show-card-modal', { detail: fullCardData }))}
+        />
+      ) : (
+        <div className="card-skeleton">
+          <style>{`
+            .card-skeleton {
+              background: #f9f8f6;
+              width: 300px;
+              height: 190px;
+              border-radius: 12px;
+              padding: 16px;
+              box-sizing: border-box;
+              display: flex;
+              flex-direction: column;
+              justify-content: space-between;
+              border: 1px solid rgba(0, 0, 0, 0.08);
+              overflow: hidden;
+            }
+
+            @keyframes pulse {
+              0%, 100% { opacity: 0.8; }
+              50% { opacity: 0.4; }
+            }
+
+            .skeleton-logo,
+            .skeleton-line,
+            .skeleton-photo,
+            .skeleton-qr {
+              background: rgba(0, 0, 0, 0.08);
+              border-radius: 4px;
+              animation: pulse 1.5s infinite ease-in-out;
+            }
+
+            .skeleton-header {
+              display: flex;
+              align-items: center;
+              gap: 12px;
+              height: 32px;
+            }
+
+            .skeleton-logo {
+              width: 28px;
+              height: 28px;
+              border-radius: 50%;
+            }
+
+            .skeleton-title-lines {
+              display: flex;
+              flex-direction: column;
+              gap: 6px;
+              flex: 1;
+            }
+
+            .title-l1 {
+              width: 60%;
+              height: 8px;
+            }
+
+            .title-l2 {
+              width: 40%;
+              height: 6px;
+            }
+
+            .skeleton-body {
+              display: flex;
+              align-items: center;
+              gap: 12px;
+              flex: 1;
+              margin-top: 14px;
+            }
+
+            .skeleton-photo {
+              width: 64px;
+              height: 78px;
+              border-radius: 6px;
+            }
+
+            .skeleton-details {
+              display: flex;
+              flex-direction: column;
+              gap: 8px;
+              flex: 1;
+            }
+
+            .detail-line {
+              width: 90%;
+              height: 6px;
+            }
+            .detail-line:nth-child(2) { width: 75%; }
+            .detail-line:nth-child(3) { width: 85%; }
+            .detail-line:nth-child(4) { width: 50%; }
+
+            .skeleton-qr {
+              width: 48px;
+              height: 48px;
+              border-radius: 6px;
+              align-self: flex-end;
+            }
+          `}</style>
+          <div className="skeleton-header">
+            <div className="skeleton-logo"></div>
+            <div className="skeleton-title-lines">
+              <div className="skeleton-line title-l1"></div>
+              <div className="skeleton-line title-l2"></div>
+            </div>
+          </div>
+          <div className="skeleton-body">
+            <div className="skeleton-photo"></div>
+            <div className="skeleton-details">
+              <div className="skeleton-line detail-line"></div>
+              <div className="skeleton-line detail-line"></div>
+              <div className="skeleton-line detail-line"></div>
+              <div className="skeleton-line detail-line"></div>
+            </div>
+            <div className="skeleton-qr"></div>
+          </div>
+        </div>
+      )}
+    </div>
+  )
+}
+
+const triggerPDFDownload = (iframeId, fileName) => {
+  const iframe = document.getElementById(iframeId);
+  if (!iframe || !iframe.contentWindow) return;
+
+  const ua = navigator.userAgent || '';
+  const isIOS = /iPad|iPhone|iPod/.test(ua) && !window.MSStream;
+  const isSafari = /^((?!chrome|android).)*safari/i.test(ua);
+  const isMobileSafari = isIOS || isSafari;
+  
+  // Check if Web Share API with files is likely supported.
+  const isShareSupported = typeof navigator.share === 'function' && typeof navigator.canShare === 'function';
+
+  let iosWin = null;
+  if (isMobileSafari && !isShareSupported) {
+    try {
+      iosWin = window.open('', '_blank');
+      if (iosWin) {
+        iosWin.document.write('<html><head><title>Generating PDF...</title><style>body{display:flex;flex-direction:column;align-items:center;justify-content:center;height:100vh;margin:0;font-family:sans-serif;background:#f5f5f5;color:#333;font-size:18px;text-align:center;padding:20px;box-sizing:border-box;}.spinner{border:4px solid rgba(0,0,0,0.1);width:36px;height:36px;border-radius:50%;border-left-color:#ff6600;animation:spin 1s linear infinite;margin-bottom:20px;}@keyframes spin{0%{transform:rotate(0deg);}100%{transform:rotate(360deg);}}</style></head><body><div class="spinner"></div><p>Generating PDF, please wait...</p></body></html>');
+        iosWin.document.close();
+      }
+      window.iosWin = iosWin;
+    } catch (e) {
+      console.warn('Failed to pre-open window on iOS', e);
+    }
+  }
+
+  if (typeof iframe.contentWindow.downloadPDF === 'function') {
+    iframe.contentWindow.downloadPDF(fileName, iosWin);
+  } else {
+    if (iosWin) iosWin.close();
+    iframe.contentWindow.focus();
+    iframe.contentWindow.print();
+  }
+};
+
+function WelcomeLetterMsg({ name, date, refCode, autoDownload }) {
+  const { t } = useLang()
+  const safeId = name.replace(/[^a-zA-Z0-9]/g, '-')
+  const wrapperRef = useRef(null)
+  
+  const handlePrint = () => {
+    triggerPDFDownload(`welcome-iframe-${safeId}`, `Welcome_Letter_${name}`);
+  }
+
+  const hasDownloaded = useRef(false)
+
+  useEffect(() => {
+    if (autoDownload && !hasDownloaded.current) {
+      const timer = setTimeout(() => {
+        hasDownloaded.current = true
+        triggerPDFDownload(`welcome-iframe-${safeId}`, `Welcome_Letter_${name}`);
+      }, 3500)
+      return () => clearTimeout(timer)
+    }
+  }, [autoDownload, name, safeId])
+
+  const letterUrl = `/Welcome_letter.html?name=${encodeURIComponent(name)}&date=${encodeURIComponent(date)}&ref=${encodeURIComponent(refCode || '')}&lang=ta&hideControls=true&apiUrl=${encodeURIComponent(import.meta.env.VITE_API_URL || '')}&v=1.0.4`
+
+  return (
+    <div ref={wrapperRef} style={{
+      background: 'var(--color-carbon)',
+      border: '1.5px solid rgba(19, 136, 8, 0.25)',
+      borderRadius: '20px',
+      padding: '16px',
+      width: '320px',
+      boxShadow: '0 8px 32px rgba(0, 0, 0, 0.2)',
+      display: 'flex',
+      flexDirection: 'column',
+      gap: 12,
+      backdropFilter: 'blur(8px)'
+    }}>
+      {/* File Header */}
+      <div style={{ display: 'flex', alignItems: 'center', gap: 10 }}>
+        <div style={{
+          width: 36,
+          height: 36,
+          borderRadius: '10px',
+          background: 'rgba(19, 136, 8, 0.1)',
+          display: 'flex',
+          alignItems: 'center',
+          justifyContent: 'center',
+          border: '1px solid rgba(19, 136, 8, 0.2)',
+          flexShrink: 0
+        }}>
+          <i className="bi bi-file-earmark-pdf-fill" style={{ color: 'var(--color-signal-mint)', fontSize: 20 }} />
+        </div>
+        <div style={{ display: 'flex', flexDirection: 'column', minWidth: 0, textAlign: 'left' }}>
+          <span style={{ fontSize: 12, fontWeight: 'bold', color: 'var(--color-chalk)', textOverflow: 'ellipsis', overflow: 'hidden', whiteSpace: 'nowrap' }}>{t('Welcome_Letter.pdf')}</span>
+          <span style={{ fontSize: 9, color: 'var(--color-ash)', whiteSpace: 'nowrap', overflow: 'hidden', textOverflow: 'ellipsis' }}>{date}</span>
+        </div>
+      </div>
+
+      {/* Embedded Iframe Preview */}
+      <div style={{
+        width: '100%',
+        height: '420px',
+        borderRadius: '12px',
+        overflow: 'hidden',
+        border: '1px solid var(--color-graphite)',
+        background: '#fff',
+        position: 'relative'
+      }}>
+        <iframe 
+          id={`welcome-iframe-${safeId}`}
+          src={letterUrl} 
+          style={{ 
+            width: '100%', 
+            height: '100%', 
+            border: 'none',
+            transform: 'scale(1.0)',
+            transformOrigin: 'top left'
+          }} 
+          title="Welcome Letter Preview"
+          onLoad={(e) => {
+            try {
+              const iframe = e.target;
+              const doc = iframe.contentDocument || iframe.contentWindow.document;
+              const controls = doc.querySelector('.controls-container');
+              if (controls) controls.style.display = 'none';
+            } catch(err) {}
+          }}
+        />
+      </div>
+
+      {/* Action Buttons */}
+      <div style={{ display: 'flex', gap: 8 }}>
+        <button
+          onClick={handlePrint}
+          style={{
+            flex: 1,
+            background: 'linear-gradient(135deg, #138808 0%, #0c5b05 100%)',
+            color: '#fff',
+            border: 'none',
+            padding: '10px 14px',
+            borderRadius: '12px',
+            fontSize: 11,
+            fontWeight: 'bold',
+            cursor: 'pointer',
+            display: 'flex',
+            alignItems: 'center',
+            justifyContent: 'center',
+            gap: 6,
+            transition: 'all 0.15s'
+          }}
+          onMouseEnter={(e) => { e.currentTarget.style.transform = 'translateY(-1px)' }}
+          onMouseLeave={(e) => { e.currentTarget.style.transform = 'none' }}
+        >
+          <i className="bi bi-file-earmark-pdf-fill" /> {t('Download PDF')}
+        </button>
+      </div>
+    </div>
+  )
+}
+
+function ReferralLinkMsg({ link }) {
+  const { t } = useLang()
+  const canvasRef = useRef(null)
+  const [copied, setCopied] = useState(false)
+  const [qrReady, setQrReady] = useState(false)
+
+  useEffect(() => {
+    if (!link || !canvasRef.current) return
+    const canvas = canvasRef.current
+    const size = 180
+    QRCode.toCanvas(canvas, link, {
+      width: size,
+      margin: 1,
+      color: { dark: '#000000', light: '#ffffff' },
+      errorCorrectionLevel: 'H'
+    }, (err) => {
+      if (err) return
+      const ctx = canvas.getContext('2d')
+      const img = new Image()
+      img.src = '/org_logo.svg'
+      img.onload = () => {
+        const logoSize = size * 0.22
+        const logoX = (size - logoSize) / 2
+        const logoY = (size - logoSize) / 2
+        ctx.save()
+        ctx.beginPath()
+        ctx.arc(size / 2, size / 2, logoSize * 0.62, 0, Math.PI * 2)
+        ctx.fillStyle = '#ffffff'
+        ctx.fill()
+        ctx.restore()
+        ctx.drawImage(img, logoX, logoY, logoSize, logoSize)
+        setQrReady(true)
+      }
+      img.onerror = () => setQrReady(true)
+    })
+  }, [link])
+
+  const handleCopyLink = () => {
+    navigator.clipboard?.writeText(link).catch(() => {})
+    setCopied(true)
+    setTimeout(() => setCopied(false), 2000)
+  }
+
+  const handleShareWhatsApp = () => {
+    if (!link) return
+    const shareText = `${t('*Join our Organization!*')}\n\n${t('*Generate your free Digital Member ID Card here:*')}\n${link}`
+    if (navigator.canShare && canvasRef.current) {
+      canvasRef.current.toBlob((blob) => {
+        const file = new File([blob], 'member-referral-qr.png', { type: 'image/png' })
+        if (navigator.canShare({ files: [file] })) {
+          navigator.share({
+            title: t('Join our Organization!'),
+            text: shareText,
+            files: [file]
+          }).catch(() => {
+            window.open(`https://wa.me/?text=${encodeURIComponent(shareText)}`, '_blank')
+          })
+          return
+        }
+        window.open(`https://wa.me/?text=${encodeURIComponent(shareText)}`, '_blank')
+      }, 'image/png', 1.0)
+    } else {
+      window.open(`https://wa.me/?text=${encodeURIComponent(shareText)}`, '_blank')
+    }
+  }
+
+  return (
+    <div style={{ display: 'flex', flexDirection: 'column', alignItems: 'center', gap: 12, padding: '8px 4px' }}>
+      <div style={{ color: 'var(--color-ash)', fontSize: 13, textAlign: 'center', fontWeight: 500, lineHeight: 1.5 }}>
+        {t('🪷 Here is your referral link and QR code! Share this to invite others and build your team:')}
+      </div>
+      
+      {/* QR Code */}
+      <div style={{ position: 'relative', display: 'inline-block' }}>
+        <div style={{
+          background: '#fff',
+          borderRadius: 12,
+          padding: 8,
+          boxShadow: '0 4px 16px rgba(0,0,0,0.15)',
+          display: 'inline-block'
+        }}>
+          <canvas ref={canvasRef} style={{ display: 'block', borderRadius: 6, width: 180, height: 180 }} />
+        </div>
+        {!qrReady && (
+          <div style={{ position: 'absolute', inset: 0, display: 'flex', alignItems: 'center', justifyContent: 'center' }}>
+            <div className="spinner-border spinner-border-sm text-warning" />
+          </div>
+        )}
+      </div>
+
+      {/* Referral Link Box */}
+      <div style={{
+        background: 'rgba(255,255,255,0.06)',
+        border: '1px solid rgba(255,255,255,0.12)',
+        borderRadius: 8,
+        padding: '8px 12px',
+        fontSize: 12,
+        color: 'var(--color-chalk)',
+        wordBreak: 'break-all',
+        width: '100%',
+        textAlign: 'center',
+        fontFamily: 'monospace'
+      }}>
+        {link}
+      </div>
+
+      {/* Share / Copy Buttons */}
+      <div style={{ display: 'flex', gap: 8, width: '100%' }}>
+        <button
+          onClick={handleCopyLink}
+          style={{
+            flex: 1,
+            display: 'flex',
+            alignItems: 'center',
+            justifyContent: 'center',
+            gap: 6,
+            padding: '10px 14px',
+            borderRadius: 8,
+            border: '1px solid rgba(255,255,255,0.15)',
+            background: copied ? 'rgba(46,204,113,0.15)' : 'rgba(255,255,255,0.07)',
+            color: copied ? '#2ecc71' : 'var(--color-chalk)',
+            fontSize: 12,
+            fontWeight: 600,
+            cursor: 'pointer',
+            transition: 'all 0.2s'
+          }}
+        >
+          <i className={`bi bi-${copied ? 'check-lg' : 'clipboard'}`} />
+          {copied ? t('Copied!') : t('Copy Link')}
+        </button>
+        <button
+          onClick={handleShareWhatsApp}
+          style={{
+            flex: 1,
+            display: 'flex',
+            alignItems: 'center',
+            justifyContent: 'center',
+            gap: 6,
+            padding: '10px 14px',
+            borderRadius: 8,
+            border: 'none',
+            background: '#25d366',
+            color: '#fff',
+            fontSize: 12,
+            fontWeight: 600,
+            cursor: 'pointer'
+          }}
+        >
+          <i className="bi bi-whatsapp" /> {t('Share WhatsApp')}
+        </button>
+      </div>
+    </div>
+  )
+}
+
+function AppreciationLetterMsg({ name, date, refCode, autoDownload }) {
+  const { t } = useLang()
+  const safeId = name.replace(/[^a-zA-Z0-9]/g, '-')
+  
+  const handlePrint = () => {
+    triggerPDFDownload(`appreciation-iframe-${safeId}`, `Appreciation_Letter_${name}`);
+  }
+
+  const hasDownloaded = useRef(false)
+
+  useEffect(() => {
+    if (autoDownload && !hasDownloaded.current) {
+      const timer = setTimeout(() => {
+        hasDownloaded.current = true
+        triggerPDFDownload(`appreciation-iframe-${safeId}`, `Appreciation_Letter_${name}`);
+      }, 3500)
+      return () => clearTimeout(timer)
+    }
+  }, [autoDownload, name, safeId])
+
+  const letterUrl = `/Appreciation_letter.html?name=${encodeURIComponent(name)}&date=${encodeURIComponent(date)}&ref=${encodeURIComponent(refCode || '')}&lang=ta&hideControls=true&apiUrl=${encodeURIComponent(import.meta.env.VITE_API_URL || '')}&v=1.0.4`
+
+  return (
+    <div style={{
+      background: 'var(--color-carbon)',
+      border: '1.5px solid rgba(19, 136, 8, 0.25)',
+      borderRadius: '20px',
+      padding: '16px',
+      width: '320px',
+      boxShadow: '0 8px 32px rgba(0, 0, 0, 0.2)',
+      display: 'flex',
+      flexDirection: 'column',
+      gap: 12,
+      backdropFilter: 'blur(8px)'
+    }}>
+      {/* File Header */}
+      <div style={{ display: 'flex', alignItems: 'center', gap: 10 }}>
+        <div style={{
+          width: 36,
+          height: 36,
+          borderRadius: '10px',
+          background: 'rgba(19, 136, 8, 0.1)',
+          display: 'flex',
+          alignItems: 'center',
+          justifyContent: 'center',
+          border: '1px solid rgba(19, 136, 8, 0.2)',
+          flexShrink: 0
+        }}>
+          <i className="bi bi-file-earmark-pdf-fill" style={{ color: 'var(--color-signal-mint)', fontSize: 20 }} />
+        </div>
+        <div style={{ display: 'flex', flexDirection: 'column', minWidth: 0, textAlign: 'left' }}>
+          <span style={{ fontSize: 12, fontWeight: 'bold', color: 'var(--color-chalk)', textOverflow: 'ellipsis', overflow: 'hidden', whiteSpace: 'nowrap' }}>{t('Appreciation_Letter.pdf')}</span>
+          <span style={{ fontSize: 9, color: 'var(--color-ash)', whiteSpace: 'nowrap', overflow: 'hidden', textOverflow: 'ellipsis' }}>{date}</span>
+        </div>
+      </div>
+
+      {/* Embedded Iframe Preview */}
+      <div style={{
+        width: '100%',
+        height: '420px',
+        borderRadius: '12px',
+        overflow: 'hidden',
+        border: '1px solid var(--color-graphite)',
+        background: '#fff',
+        position: 'relative'
+      }}>
+        <iframe 
+          id={`appreciation-iframe-${safeId}`}
+          src={letterUrl} 
+          style={{ 
+            width: '100%', 
+            height: '100%', 
+            border: 'none',
+            transform: 'scale(1.0)',
+            transformOrigin: 'top left'
+          }} 
+          title="Appreciation Letter Preview"
+          onLoad={(e) => {
+            try {
+              const iframe = e.target;
+              const doc = iframe.contentDocument || iframe.contentWindow.document;
+              const controls = doc.querySelector('.controls-container');
+              if (controls) controls.style.display = 'none';
+            } catch(err) {}
+          }}
+        />
+      </div>
+
+      {/* Action Buttons */}
+      <div style={{ display: 'flex', gap: 8 }}>
+        <button
+          onClick={handlePrint}
+          style={{
+            flex: 1,
+            background: 'linear-gradient(135deg, #138808 0%, #0c5b05 100%)',
+            color: '#fff',
+            border: 'none',
+            padding: '10px 14px',
+            borderRadius: '12px',
+            fontSize: 11,
+            fontWeight: 'bold',
+            cursor: 'pointer',
+            display: 'flex',
+            alignItems: 'center',
+            justifyContent: 'center',
+            gap: 6,
+            transition: 'all 0.15s'
+          }}
+          onMouseEnter={(e) => { e.currentTarget.style.transform = 'translateY(-1px)' }}
+          onMouseLeave={(e) => { e.currentTarget.style.transform = 'none' }}
+        >
+          <i className="bi bi-file-earmark-pdf-fill" /> {t('Download PDF')}
+        </button>
+      </div>
+    </div>
+  )
+}
+
+function SelectWingMsg({ bjpCode, epicNo, isLatest }) {
+  const { t } = useLang()
+  const [selectedWing, setSelectedWing] = useState('')
+  const [submitted, setSubmitted] = useState(false)
+  const [loading, setLoading] = useState(false)
+  const [checking, setChecking] = useState(true)
+  const [statusText, setStatusText] = useState('')
+  const [existingRequest, setExistingRequest] = useState(null)
+
+  const wings = []
+
+  useEffect(() => {
+    if (!bjpCode) {
+      setChecking(false)
+      return
+    }
+    chat.getRequestStatus(bjpCode)
+      .then(res => {
+        if (res.success && res.volunteer) {
+          setExistingRequest(res.volunteer)
+          setSubmitted(true)
+        }
+      })
+      .catch(err => {
+        console.error('Error fetching request status:', err)
+      })
+      .finally(() => {
+        setChecking(false)
+      })
+  }, [bjpCode])
+
+  const handleSubmit = async () => {
+    if (wings.length > 0 && !selectedWing) return
+    setLoading(true)
+    try {
+      const res = await chat.requestVolunteer(bjpCode, epicNo, selectedWing || 'Organizer')
+      setSubmitted(true)
+      setStatusText(res.message || t('✅ Organizer request submitted! Admin will review it shortly.'))
+    } catch (err) {
+      setStatusText(`❌ ${err.message || t('Unable to submit request. Please try again.')}`)
+    } finally {
+      setLoading(false)
+    }
+  }
+
+  if (checking) {
+    return (
+      <div style={{ display: 'flex', flexDirection: 'column', alignItems: 'center', justifyContent: 'center', minHeight: 200 }}>
+        <div style={{ width: 32, height: 32, border: '3px solid rgba(46, 204, 113, 0.15)', borderTopColor: 'var(--color-signal-mint)', borderRadius: '50%', animation: 'spin 1s linear infinite' }} />
+        <div style={{ fontSize: 13, color: 'var(--color-ash)', marginTop: 12 }}>{t('Checking status...')}</div>
+      </div>
+    )
+  }
+
+  return (
+    <div style={{ 
+      width: '100%', 
+      maxWidth: '600px',
+      margin: '0 auto',
+      display: 'flex',
+      flexDirection: 'column',
+      gap: 24
+    }}>
+      {/* Role Header Description */}
+      <div style={{ textAlign: 'center', marginBottom: 12 }}>
+        <div style={{
+          width: 72,
+          height: 72,
+          borderRadius: '50%',
+          background: 'rgba(255, 153, 51, 0.1)',
+          display: 'flex',
+          alignItems: 'center',
+          justifyContent: 'center',
+          margin: '0 auto 12px auto'
+        }}>
+          <i className="bi bi-hand-thumbs-up-fill" style={{ fontSize: 36, color: '#1E3A8A' }} />
+        </div>
+        <h3 style={{ fontSize: 20, fontWeight: 700, color: 'var(--color-chalk)', marginBottom: 8 }}>{t('Organizer Wing')}</h3>
+        <p style={{ fontSize: 13, color: 'var(--color-ash)', lineHeight: '1.6', margin: '0 auto', maxWidth: '480px' }}>
+          {t("As an Organizer, you play a pivotal role in strengthening the organization's foundation. Select your preferred Wing to lead local initiatives, mobilize community support, and drive organizational progress across Tamil Nadu.")}
+        </p>
+      </div>
+
+      {existingRequest ? (
+        <div style={{ display: 'flex', flexDirection: 'column', alignItems: 'center', gap: 20 }}>
+          {/* Custom SVG Pending / Success Spinner */}
+          <div style={{ position: 'relative', width: 80, height: 80 }}>
+            {existingRequest.status === 'confirmed' ? (
+              <svg width="80" height="80" viewBox="0 0 24 24" fill="none" stroke="#2ecc71" strokeWidth="2">
+                <circle cx="12" cy="12" r="10" />
+                <polyline points="22 4 12 14.01 9 11.01" />
+              </svg>
+            ) : existingRequest.status === 'rejected' ? (
+              <svg width="80" height="80" viewBox="0 0 24 24" fill="none" stroke="#dc2626" strokeWidth="2" strokeLinecap="round">
+                <circle cx="12" cy="12" r="10" />
+                <line x1="15" y1="9" x2="9" y2="15" />
+                <line x1="9" y1="9" x2="15" y2="15" />
+              </svg>
+            ) : (
+              <svg width="80" height="80" viewBox="0 0 24 24" fill="none" stroke="#1E3A8A" strokeWidth="1.5" strokeLinecap="round" strokeLinejoin="round" className="pending-svg">
+                <circle cx="12" cy="12" r="10" style={{ strokeDasharray: '60', strokeDashoffset: '20', animation: 'spin-pending 3s linear infinite' }} />
+                <polyline points="12 6 12 12 15 15" />
+              </svg>
+            )}
+          </div>
+
+          <div style={{ textAlign: 'center', fontSize: 15, fontWeight: 600, color: 'var(--color-chalk)' }}>
+            {t('Status:')} <span style={{ textTransform: 'capitalize', color: existingRequest.status === 'confirmed' ? '#2ecc71' : existingRequest.status === 'rejected' ? '#dc2626' : '#1E3A8A' }}>{t(existingRequest.status)}</span>
+          </div>
+
+          {/* Grid fields */}
+          <div style={{ width: '100%', display: 'grid', gridTemplateColumns: '1fr', gap: 12 }}>
+            <div style={{ 
+              background: 'var(--color-carbon)', 
+              border: '1px solid var(--color-graphite)',
+              borderRadius: 12,
+              padding: '12px 16px',
+              display: 'flex',
+              flexDirection: 'column',
+              gap: 4
+            }}>
+              <div style={{ display: 'flex', alignItems: 'center', gap: 6, fontSize: 11, color: 'var(--color-ash)' }}>
+                <i className="bi bi-tag-fill" style={{ color: '#1E3A8A' }} />
+                <span>{t('Assigned Wing')}</span>
+              </div>
+              <span style={{ fontSize: 13, fontWeight: 600, color: 'var(--color-chalk)' }}>{existingRequest.wing}</span>
+            </div>
+
+            <div style={{ 
+              background: 'var(--color-carbon)', 
+              border: '1px solid var(--color-graphite)',
+              borderRadius: 12,
+              padding: '12px 16px',
+              display: 'flex',
+              flexDirection: 'column',
+              gap: 4
+            }}>
+              <div style={{ display: 'flex', alignItems: 'center', gap: 6, fontSize: 11, color: 'var(--color-ash)' }}>
+                <i
+                  className={`bi ${existingRequest.status === 'confirmed' ? 'bi-check-circle-fill' : existingRequest.status === 'rejected' ? 'bi-x-circle-fill' : 'bi-clock-history'}`}
+                  style={{ color: existingRequest.status === 'confirmed' ? '#2ecc71' : existingRequest.status === 'rejected' ? '#dc2626' : '#1E3A8A' }}
+                />
+                <span>{t('Application Status')}</span>
+              </div>
+              <span style={{ fontSize: 13, fontWeight: 600, color: 'var(--color-chalk)' }}>
+                {existingRequest.status === 'confirmed'
+                  ? t('Approved & Activated')
+                  : existingRequest.status === 'rejected'
+                  ? t('Rejected by Admin')
+                  : t('Pending Admin Verification')}
+              </span>
+            </div>
+          </div>
+        </div>
+      ) : !submitted ? (
+        <div style={{ 
+          background: 'var(--color-carbon)',
+          border: '1px solid var(--color-graphite)',
+          borderRadius: 16,
+          padding: '24px 20px',
+          width: '100%',
+          maxWidth: '440px',
+          margin: '0 auto'
+        }}>
+          {wings.length > 0 && (
+            <>
+              <label htmlFor="wing-select" style={{ fontSize: 13, display: 'block', marginBottom: 8, color: 'var(--color-chalk)', fontWeight: '500' }}>
+                {t('Select your preferred Wing:')}
+              </label>
+              <select
+                id="wing-select"
+                style={{ 
+                  width: '100%', 
+                  marginBottom: 16, 
+                  padding: 10, 
+                  borderRadius: 8, 
+                  background: 'var(--color-carbon)', 
+                  color: 'var(--color-chalk)', 
+                  border: '1px solid var(--color-graphite)', 
+                  fontSize: 13 
+                }}
+                value={selectedWing}
+                onChange={(e) => setSelectedWing(e.target.value)}
+                disabled={loading}
+              >
+                <option value="" style={{ color: 'var(--color-ash)' }}>{t('-- Select Wing --')}</option>
+                {wings.map(w => <option key={w} value={w}>{t(w)}</option>)}
+              </select>
+            </>
+          )}
+          <button
+            style={{
+              width: '100%',
+              padding: '12px 16px',
+              background: '#1E3A8A',
+              border: 'none',
+              borderRadius: 8,
+              color: '#ffffff',
+              fontWeight: 'bold',
+              fontSize: 13,
+              cursor: 'pointer',
+              display: 'flex',
+              alignItems: 'center',
+              justifyContent: 'center',
+              gap: 8,
+              opacity: ((wings.length > 0 && !selectedWing) || loading) ? 0.6 : 1
+            }}
+            onClick={handleSubmit}
+            disabled={(wings.length > 0 && !selectedWing) || loading}
+          >
+            {loading ? t('Submitting...') : t('Submit Request')}
+          </button>
+        </div>
+      ) : (
+        <div style={{ 
+          background: 'var(--color-carbon)',
+          border: '1px solid var(--color-graphite)',
+          borderRadius: 16,
+          padding: '24px 20px',
+          width: '100%',
+          maxWidth: '440px',
+          margin: '0 auto',
+          textAlign: 'center',
+          color: 'var(--color-chalk)',
+          fontSize: 14,
+          lineHeight: '1.6'
+        }}>
+          {statusText}
+        </div>
+      )}
+      <style>{`
+        @keyframes spin-pending {
+          to { stroke-dashoffset: -60; }
+        }
+        .pending-svg circle {
+          transform-origin: center;
+          animation: spin-pending 2s linear infinite;
+        }
+      `}</style>
+    </div>
+  )
+}
+
+function BoothAgentSetupMsg({ bjpCode, epicNo, isLatest }) {
+  const { t } = useLang()
+  const [districtsData, setDistrictsData] = useState(null)
+  const [district, setDistrict] = useState('')
+  const [assembly, setAssembly] = useState(null)
+  const [booth, setBooth] = useState('')
+  const [step, setStep] = useState('district') // 'district' | 'assembly' | 'booth' | 'submitted' | 'error' | 'already_submitted'
+  const [loading, setLoading] = useState(false)
+  const [checking, setChecking] = useState(true)
+  const [errorMsg, setErrorMsg] = useState('')
+  const [existingRequest, setExistingRequest] = useState(null)
+
+  useEffect(() => {
+    if (!bjpCode) {
+      setChecking(false)
+      return
+    }
+    chat.getRequestStatus(bjpCode)
+      .then(res => {
+        if (res.success && res.boothAgent) {
+          setExistingRequest(res.boothAgent)
+          setStep('already_submitted')
+        }
+      })
+      .catch(err => {
+        console.error('Error fetching request status:', err)
+      })
+      .finally(() => {
+        setChecking(false)
+      })
+  }, [bjpCode])
+
+  useEffect(() => {
+    if (step === 'already_submitted') return
+    chat.getDistrictsData()
+      .then(res => {
+        if (res.success && res.data) {
+          setDistrictsData(res.data)
+        } else {
+          setErrorMsg(t('Failed to load district data.'))
+          setStep('error')
+        }
+      })
+      .catch(err => {
+        setErrorMsg(t('Failed to load district data: {error}', { error: err.message || '' }))
+        setStep('error')
+      })
+  }, [step])
+
+  const handleDistrictSubmit = () => {
+    if (district) setStep('assembly')
+  }
+
+  const handleAssemblySubmit = () => {
+    if (assembly) setStep('booth')
+  }
+
+  const handleBoothSubmit = async () => {
+    if (!booth) return
+    setLoading(true)
+    try {
+      const res = await chat.requestBoothAgent(bjpCode, epicNo, booth, assembly.name, district)
+      setStep('submitted')
+    } catch (err) {
+      setErrorMsg(err.message || t('Failed to submit booth agent request.'))
+      setStep('error')
+    } finally {
+      setLoading(false)
+    }
+  }
+
+  if (checking) {
+    return (
+      <div style={{ display: 'flex', flexDirection: 'column', alignItems: 'center', justifyContent: 'center', minHeight: 200 }}>
+        <div style={{ width: 32, height: 32, border: '3px solid rgba(46, 204, 113, 0.15)', borderTopColor: 'var(--color-signal-mint)', borderRadius: '50%', animation: 'spin 1s linear infinite' }} />
+        <div style={{ fontSize: 13, color: 'var(--color-ash)', marginTop: 12 }}>{t('Checking status...')}</div>
+      </div>
+    )
+  }
+
+  if (step === 'error') {
+    return (
+      <div style={{ textAlign: 'center', padding: '40px 20px', color: '#b45309' }}>
+        <i className="bi bi-exclamation-triangle" style={{ fontSize: 32, marginBottom: 12, display: 'block' }} />
+        {errorMsg}
+      </div>
+    )
+  }
+
+  if (step !== 'already_submitted' && !districtsData) {
+    return (
+      <div style={{ display: 'flex', flexDirection: 'column', alignItems: 'center', justifyContent: 'center', minHeight: 200 }}>
+        <div style={{ width: 32, height: 32, border: '3px solid rgba(46, 204, 113, 0.15)', borderTopColor: 'var(--color-signal-mint)', borderRadius: '50%', animation: 'spin 1s linear infinite' }} />
+        <div style={{ fontSize: 13, color: 'var(--color-ash)', marginTop: 12 }}>{t('Loading districts...')}</div>
+      </div>
+    )
+  }
+
+  const districts = districtsData ? Object.keys(districtsData) : []
+  const assemblies = (district && districtsData) ? districtsData[district] : []
+  const maxBooths = assembly ? assembly.booths : 0
+  const booths = Array.from({ length: maxBooths }, (_, i) => i + 1)
+
+  return (
+    <div style={{ 
+      width: '100%', 
+      maxWidth: '600px',
+      margin: '0 auto',
+      display: 'flex',
+      flexDirection: 'column',
+      gap: 24
+    }}>
+      {/* Role Header Description */}
+      <div style={{ textAlign: 'center', marginBottom: 12 }}>
+        <div style={{
+          width: 72,
+          height: 72,
+          borderRadius: '50%',
+          background: 'rgba(255, 153, 51, 0.1)',
+          display: 'flex',
+          alignItems: 'center',
+          justifyContent: 'center',
+          margin: '0 auto 12px auto'
+        }}>
+          <i className="bi bi-building-fill-check" style={{ fontSize: 36, color: '#1E3A8A' }} />
+        </div>
+        <h3 style={{ fontSize: 20, fontWeight: 700, color: 'var(--color-chalk)', marginBottom: 8 }}>{t('Booth Agent')}</h3>
+        <p style={{ fontSize: 13, color: 'var(--color-ash)', lineHeight: '1.6', margin: '0 auto', maxWidth: '480px' }}>
+          {t('As a Booth Agent, you are the crucial guardian of our democratic process at the polling booth level. You will be responsible for booth management, voter facilitation, and ensuring fair elections in your local part.')}
+        </p>
+      </div>
+
+      {step === 'already_submitted' && existingRequest && (
+        <div style={{ display: 'flex', flexDirection: 'column', alignItems: 'center', gap: 20 }}>
+          {/* Custom SVG Pending / Success Spinner */}
+          <div style={{ position: 'relative', width: 80, height: 80 }}>
+            {existingRequest.status === 'confirmed' ? (
+              <svg width="80" height="80" viewBox="0 0 24 24" fill="none" stroke="#2ecc71" strokeWidth="2">
+                <circle cx="12" cy="12" r="10" />
+                <polyline points="22 4 12 14.01 9 11.01" />
+              </svg>
+            ) : existingRequest.status === 'rejected' ? (
+              <svg width="80" height="80" viewBox="0 0 24 24" fill="none" stroke="#dc2626" strokeWidth="2" strokeLinecap="round">
+                <circle cx="12" cy="12" r="10" />
+                <line x1="15" y1="9" x2="9" y2="15" />
+                <line x1="9" y1="9" x2="15" y2="15" />
+              </svg>
+            ) : (
+              <svg width="80" height="80" viewBox="0 0 24 24" fill="none" stroke="#1E3A8A" strokeWidth="1.5" strokeLinecap="round" strokeLinejoin="round" className="pending-svg">
+                <circle cx="12" cy="12" r="10" style={{ strokeDasharray: '60', strokeDashoffset: '20', animation: 'spin-pending 3s linear infinite' }} />
+                <polyline points="12 6 12 12 15 15" />
+              </svg>
+            )}
+          </div>
+
+          <div style={{ textAlign: 'center', fontSize: 15, fontWeight: 600, color: 'var(--color-chalk)' }}>
+            {t('Status:')} <span style={{ textTransform: 'capitalize', color: existingRequest.status === 'confirmed' ? '#2ecc71' : existingRequest.status === 'rejected' ? '#dc2626' : '#1E3A8A' }}>{t(existingRequest.status)}</span>
+          </div>
+
+          {/* Grid fields */}
+          <div style={{ width: '100%', display: 'grid', gridTemplateColumns: 'repeat(2, 1fr)', gap: 12 }}>
+            <div style={{ 
+              background: 'var(--color-carbon)', 
+              border: '1px solid var(--color-graphite)',
+              borderRadius: 12,
+              padding: '12px 16px',
+              display: 'flex',
+              flexDirection: 'column',
+              gap: 4
+            }}>
+              <div style={{ display: 'flex', alignItems: 'center', gap: 6, fontSize: 11, color: 'var(--color-ash)' }}>
+                <i className="bi bi-map" style={{ color: '#1E3A8A' }} />
+                <span>{t('District')}</span>
+              </div>
+              <span style={{ fontSize: 13, fontWeight: 600, color: 'var(--color-chalk)' }}>{existingRequest.district}</span>
+            </div>
+
+            <div style={{ 
+              background: 'var(--color-carbon)', 
+              border: '1px solid var(--color-graphite)',
+              borderRadius: 12,
+              padding: '12px 16px',
+              display: 'flex',
+              flexDirection: 'column',
+              gap: 4
+            }}>
+              <div style={{ display: 'flex', alignItems: 'center', gap: 6, fontSize: 11, color: 'var(--color-ash)' }}>
+                <i className="bi bi-geo-alt" style={{ color: '#1E3A8A' }} />
+                <span>{t('Assembly')}</span>
+              </div>
+              <span style={{ fontSize: 13, fontWeight: 600, color: 'var(--color-chalk)' }}>{existingRequest.assembly}</span>
+            </div>
+
+            <div style={{ 
+              background: 'var(--color-carbon)', 
+              border: '1px solid var(--color-graphite)',
+              borderRadius: 12,
+              padding: '12px 16px',
+              display: 'flex',
+              flexDirection: 'column',
+              gap: 4,
+              gridColumn: 'span 2'
+            }}>
+              <div style={{ display: 'flex', alignItems: 'center', gap: 6, fontSize: 11, color: 'var(--color-ash)' }}>
+                <i className="bi bi-pin-map" style={{ color: '#1E3A8A' }} />
+                <span>{t('Polling Booth Location')}</span>
+              </div>
+              <span style={{ fontSize: 13, fontWeight: 600, color: 'var(--color-chalk)' }}>{t('Booth Number {booth}', { booth: existingRequest.booth_no })}</span>
+            </div>
+          </div>
+        </div>
+      )}
+
+      {step !== 'already_submitted' && step !== 'submitted' && (
+        <div style={{ 
+          background: 'var(--color-carbon)',
+          border: '1px solid var(--color-graphite)',
+          borderRadius: 16,
+          padding: '24px 20px',
+          width: '100%',
+          maxWidth: '440px',
+          margin: '0 auto'
+        }}>
+          {step === 'district' && (
+            <>
+              <label htmlFor="district-select" style={{ fontSize: 13, display: 'block', marginBottom: 8, color: 'var(--color-chalk)', fontWeight: '500' }}>
+                {t('Select District:')}
+              </label>
+              <select
+                id="district-select"
+                style={{ width: '100%', marginBottom: 16, padding: 10, borderRadius: 8, background: 'var(--color-carbon)', color: 'var(--color-chalk)', border: '1px solid var(--color-graphite)', fontSize: 13 }}
+                value={district}
+                onChange={(e) => {
+                  setDistrict(e.target.value)
+                  setAssembly(null)
+                  setBooth('')
+                }}
+              >
+                <option value="" style={{ color: 'var(--color-ash)' }}>{t('-- Choose a District --')}</option>
+                {districts.map(d => <option key={d} value={d}>{d}</option>)}
+              </select>
+              <button
+                style={{
+                  width: '100%',
+                  padding: '12px 16px',
+                  background: '#1E3A8A',
+                  border: 'none',
+                  borderRadius: 8,
+                  color: '#ffffff',
+                  fontWeight: 'bold',
+                  fontSize: 13,
+                  cursor: 'pointer',
+                  display: 'flex',
+                  alignItems: 'center',
+                  justifyContent: 'center',
+                  gap: 8,
+                  opacity: !district ? 0.6 : 1
+                }}
+                onClick={handleDistrictSubmit}
+                disabled={!district}
+              >
+                {t('Next')} <i className="bi bi-chevron-right" />
+              </button>
+            </>
+          )}
+
+          {step === 'assembly' && (
+            <>
+              <div style={{ fontSize: 12, color: 'var(--color-ash)', marginBottom: 12 }}>
+                {t('District')}: <strong style={{ color: 'var(--color-chalk)' }}>{district}</strong>
+              </div>
+              <label htmlFor="assembly-select" style={{ fontSize: 13, display: 'block', marginBottom: 8, color: 'var(--color-chalk)', fontWeight: '500' }}>
+                {t('Choose Assembly:')}
+              </label>
+              <select
+                id="assembly-select"
+                style={{ width: '100%', marginBottom: 16, padding: 10, borderRadius: 8, background: 'var(--color-carbon)', color: 'var(--color-chalk)', border: '1px solid var(--color-graphite)', fontSize: 13 }}
+                value={assembly ? JSON.stringify(assembly) : ''}
+                onChange={(e) => {
+                  setAssembly(e.target.value ? JSON.parse(e.target.value) : null)
+                  setBooth('')
+                }}
+              >
+                <option value="" style={{ color: 'var(--color-ash)' }}>{t('-- Choose an Assembly --')}</option>
+                {assemblies.map(a => <option key={a.no} value={JSON.stringify(a)}>{a.name} ({a.no})</option>)}
+              </select>
+              <div style={{ display: 'flex', gap: 8 }}>
+                <button
+                  style={{
+                    flex: 1,
+                    padding: '12px 16px',
+                    background: '#64748b',
+                    border: 'none',
+                    borderRadius: 8,
+                    color: '#ffffff',
+                    fontWeight: 'bold',
+                    fontSize: 13,
+                    cursor: 'pointer',
+                    display: 'flex',
+                    alignItems: 'center',
+                    justifyContent: 'center',
+                    gap: 8
+                  }}
+                  onClick={() => setStep('district')}
+                >
+                  <i className="bi bi-chevron-left" /> {t('Back')}
+                </button>
+                <button
+                  style={{
+                    flex: 1,
+                    padding: '12px 16px',
+                    background: '#1E3A8A',
+                    border: 'none',
+                    borderRadius: 8,
+                    color: '#ffffff',
+                    fontWeight: 'bold',
+                    fontSize: 13,
+                    cursor: 'pointer',
+                    display: 'flex',
+                    alignItems: 'center',
+                    justifyContent: 'center',
+                    gap: 8,
+                    opacity: !assembly ? 0.6 : 1
+                  }}
+                  onClick={handleAssemblySubmit}
+                  disabled={!assembly}
+                >
+                  {t('Next')} <i className="bi bi-chevron-right" />
+                </button>
+              </div>
+            </>
+          )}
+
+          {step === 'booth' && (
+            <>
+              <div style={{ fontSize: 12, color: 'var(--color-ash)', marginBottom: 12, lineHeight: '1.4' }}>
+                {t('District')}: <strong style={{ color: 'var(--color-chalk)' }}>{district}</strong><br/>
+                {t('Assembly')}: <strong style={{ color: 'var(--color-chalk)' }}>{assembly.name}</strong>
+              </div>
+              <label htmlFor="booth-select" style={{ fontSize: 13, display: 'block', marginBottom: 8, color: 'var(--color-chalk)', fontWeight: '500' }}>
+                {t('Select Polling Booth:')}
+              </label>
+              <select
+                id="booth-select"
+                style={{ width: '100%', marginBottom: 16, padding: 10, borderRadius: 8, background: 'var(--color-carbon)', color: 'var(--color-chalk)', border: '1px solid var(--color-graphite)', fontSize: 13 }}
+                value={booth}
+                onChange={(e) => setBooth(e.target.value)}
+              >
+                <option value="" style={{ color: 'var(--color-ash)' }}>{t('-- Choose a Booth Number --')}</option>
+                {booths.map(b => <option key={b} value={b}>{t('Booth {booth}', { booth: b })}</option>)}
+              </select>
+              <div style={{ display: 'flex', gap: 8 }}>
+                <button
+                  style={{
+                    flex: 1,
+                    padding: '12px 16px',
+                    background: '#64748b',
+                    border: 'none',
+                    borderRadius: 8,
+                    color: '#ffffff',
+                    fontWeight: 'bold',
+                    fontSize: 13,
+                    cursor: 'pointer',
+                    display: 'flex',
+                    alignItems: 'center',
+                    justifyContent: 'center',
+                    gap: 8
+                  }}
+                  onClick={() => setStep('assembly')}
+                  disabled={loading}
+                >
+                  <i className="bi bi-chevron-left" /> {t('Back')}
+                </button>
+                <button
+                  style={{
+                    flex: 1,
+                    padding: '12px 16px',
+                    background: '#1E3A8A',
+                    border: 'none',
+                    borderRadius: 8,
+                    color: '#ffffff',
+                    fontWeight: 'bold',
+                    fontSize: 13,
+                    cursor: 'pointer',
+                    display: 'flex',
+                    alignItems: 'center',
+                    justifyContent: 'center',
+                    gap: 8,
+                    opacity: (!booth || loading) ? 0.6 : 1
+                  }}
+                  onClick={handleBoothSubmit}
+                  disabled={!booth || loading}
+                >
+                  {loading ? t('Submitting...') : t('Submit Request')}
+                </button>
+              </div>
+            </>
+          )}
+        </div>
+      )}
+
+      {step === 'submitted' && (
+        <div style={{ 
+          background: 'var(--color-carbon)',
+          border: '1px solid var(--color-graphite)',
+          borderRadius: 16,
+          padding: '24px 20px',
+          width: '100%',
+          maxWidth: '440px',
+          margin: '0 auto',
+          textAlign: 'center',
+          color: 'var(--color-chalk)',
+          fontSize: 14,
+          lineHeight: '1.6'
+        }}>
+          ✅ <strong>{t('Your booth agent request has been submitted successfully!')}</strong><br/>
+          <span style={{ fontSize: 12, opacity: 0.8 }}>{t('Admin will review your request shortly.')}</span>
+        </div>
+      )}
+      <style>{`
+        @keyframes spin-pending {
+          to { stroke-dashoffset: -60; }
+        }
+        .pending-svg circle {
+          transform-origin: center;
+          animation: spin-pending 2s linear infinite;
+        }
+      `}</style>
+    </div>
+  )
+}
+
+// ── Card Full View Modal Component ──────────────────────────
+function CardModal({ cardData, onClose }) {
+  const { t } = useLang()
+  const modalRef = useRef(null)
+  const [downloading, setDownloading] = useState(false)
+  const [cardWidth, setCardWidth] = useState(Math.min(window.innerWidth - 48, 520))
+
+  useEffect(() => {
+    const handleResize = () => setCardWidth(Math.min(window.innerWidth - 48, 520))
+    window.addEventListener('resize', handleResize)
+    return () => window.removeEventListener('resize', handleResize)
+  }, [])
+
+  return (
+    <div
+      style={{
+        position: 'fixed',
+        inset: 0,
+        backgroundColor: 'rgba(0, 0, 0, 0.85)',
+        backdropFilter: 'blur(4px)',
+        zIndex: 9999,
+        display: 'flex',
+        alignItems: 'center',
+        justifyContent: 'center',
+        padding: 24,
+      }}
+      onClick={onClose}
+    >
+      <div
+        style={{
+          background: 'var(--color-carbon)',
+          border: '1px solid var(--color-graphite)',
+          borderRadius: 24,
+          padding: 24,
+          display: 'flex',
+          flexDirection: 'column',
+          alignItems: 'center',
+          gap: 20,
+          maxWidth: '100%',
+          position: 'relative',
+          boxShadow: '0 20px 50px rgba(0,0,0,0.3)',
+        }}
+        onClick={(e) => e.stopPropagation()}
+      >
+        <button
+          onClick={onClose}
+          style={{
+            position: 'absolute',
+            top: 16,
+            right: 16,
+            background: 'transparent',
+            border: 'none',
+            color: 'var(--color-ash)',
+            fontSize: 20,
+            cursor: 'pointer',
+            zIndex: 10,
+            transition: 'color 0.15s',
+          }}
+          onMouseEnter={(e) => e.target.style.color = 'var(--color-chalk)'}
+          onMouseLeave={(e) => e.target.style.color = 'var(--color-ash)'}
+          aria-label="Close"
+        >
+          <i className="bi bi-x-lg" />
+        </button>
+
+        <div style={{ alignSelf: 'flex-start', marginTop: 4 }}>
+          <div style={{ fontSize: 12, fontWeight: 500, color: 'var(--color-ash)', textTransform: 'uppercase', letterSpacing: '0.05em' }}>
+            <i className="bi bi-credit-card-2-front" /> {t('Digital Member Card')}
+          </div>
+        </div>
+
+        <FlipCard3D
+          ref={modalRef}
+          cardData={cardData}
+          width={cardWidth}
+          showActions={false}
+        />
+
+        <div style={{ display: 'flex', gap: 12, width: '100%', justifyContent: 'center' }}>
+          <button
+            onClick={async () => {
+              setDownloading(true)
+              try {
+                await modalRef.current?.download()
+              } finally {
+                setDownloading(false)
+              }
+            }}
+            disabled={downloading}
+            style={{
+              display: 'inline-flex',
+              alignItems: 'center',
+              gap: 8,
+              background: 'var(--color-signal-mint)',
+              color: 'var(--color-abyss)',
+              border: 'none',
+              padding: '10px 24px',
+              minHeight: 44,
+              borderRadius: 16,
+              fontSize: 14,
+              fontWeight: 500,
+              cursor: 'pointer',
+            }}
+          >
+            {downloading ? (
+              <span className="spinner-border spinner-border-sm" style={{ width: 12, height: 12, borderWidth: 2 }} />
+            ) : (
+              <i className="bi bi-download" />
+            )}
+            {t('Download Card')}
+          </button>
+          <button
+            onClick={onClose}
+            style={{
+              display: 'inline-flex',
+              alignItems: 'center',
+              gap: 8,
+              background: 'transparent',
+              border: '1px solid var(--color-graphite)',
+              color: 'var(--color-chalk)',
+              padding: '10px 20px',
+              minHeight: 44,
+              borderRadius: 16,
+              fontSize: 14,
+              fontWeight: 500,
+              cursor: 'pointer',
+            }}
+          >
+            {t('Close')}
+          </button>
+        </div>
+      </div>
+    </div>
+  )
+}
+
+function FullLetterPanel({ type, name, date, refCode, epicNo, onBack }) {
+  const { t, showTamilVersion } = useLang()
+  const [selectedLang, setSelectedLang] = useState(showTamilVersion ? 'ta' : 'en')
+  const [resolvedRefCode, setResolvedRefCode] = useState(refCode || '')
+
+  useEffect(() => {
+    if (refCode) {
+      setResolvedRefCode(refCode)
+    }
+  }, [refCode])
+
+  useEffect(() => {
+    if (!resolvedRefCode && epicNo) {
+      publicApi.getCardData(epicNo)
+        .then((data) => {
+          if (data && data.bjp_code) {
+            setResolvedRefCode(data.bjp_code)
+          }
+        })
+        .catch(() => {})
+    }
+  }, [resolvedRefCode, epicNo])
+
+  const handleDownloadPDF = () => {
+    const fileName = `${type === 'appreciation' ? 'Appreciation_Letter' : 'Welcome_Letter'}_${name}`
+    triggerPDFDownload('full-letter-iframe', fileName);
+  }
+
+  const isAppreciation = type === 'appreciation';
+  const letterUrl = isAppreciation
+    ? `/Appreciation_letter.html?name=${encodeURIComponent(name)}&date=${encodeURIComponent(date)}&ref=${encodeURIComponent(resolvedRefCode || '')}&lang=${selectedLang}&hideControls=true&apiUrl=${encodeURIComponent(import.meta.env.VITE_API_URL || '')}&v=1.0.4`
+    : `/Welcome_letter.html?name=${encodeURIComponent(name)}&date=${encodeURIComponent(date)}&ref=${encodeURIComponent(resolvedRefCode || '')}&lang=${selectedLang}&hideControls=true&apiUrl=${encodeURIComponent(import.meta.env.VITE_API_URL || '')}&v=1.0.4`;
+
+  return (
+    <div className="chatbot-container brochure-panel">
+      <header className="brochure-header">
+        <div className="brochure-title" style={{ display: 'flex', alignItems: 'center', gap: 10 }}>
+          <button 
+            onClick={onBack}
+            style={{
+              background: 'none',
+              border: 'none',
+              color: 'var(--color-ash)',
+              cursor: 'pointer',
+              padding: '4px 8px 4px 0',
+              fontSize: '18px',
+              display: 'flex',
+              alignItems: 'center',
+              transition: 'color 0.15s'
+            }}
+            onMouseEnter={(e) => e.currentTarget.style.color = 'var(--color-chalk)'}
+            onMouseLeave={(e) => e.currentTarget.style.color = 'var(--color-ash)'}
+            aria-label="Back"
+          >
+            <i className="bi bi-chevron-left" />
+          </button>
+          <i className={`bi bi-${isAppreciation ? 'award-fill' : 'envelope-paper-fill'} brochure-title-orange`} />
+          <span>{isAppreciation ? t('Letter of Appreciation') : t('Welcome Letter')}</span>
+        </div>
+        <div style={{ display: 'flex', gap: 12, alignItems: 'center' }}>
+          {/* Tamil / Eng Toggle */}
+          {showTamilVersion && (
+            <div style={{ 
+              display: 'flex', 
+              background: 'var(--color-carbon)', 
+              border: '1px solid var(--color-graphite)', 
+              borderRadius: '20px', 
+              padding: '2px',
+              alignItems: 'center'
+            }}>
+              <button
+                onClick={() => setSelectedLang('ta')}
+                style={{
+                  background: selectedLang === 'ta' ? 'var(--color-signal-mint)' : 'transparent',
+                  color: selectedLang === 'ta' ? '#fff' : 'var(--color-ash)',
+                  border: 'none',
+                  borderRadius: '18px',
+                  padding: '6px 14px',
+                  fontSize: '12px',
+                  fontWeight: '600',
+                  cursor: 'pointer',
+                  transition: 'all 0.2s'
+                }}
+              >
+                தமிழ்
+              </button>
+              <button
+                onClick={() => setSelectedLang('en')}
+                style={{
+                  background: selectedLang === 'en' ? 'var(--color-signal-mint)' : 'transparent',
+                  color: selectedLang === 'en' ? '#fff' : 'var(--color-ash)',
+                  border: 'none',
+                  borderRadius: '18px',
+                  padding: '6px 14px',
+                  fontSize: '12px',
+                  fontWeight: '600',
+                  cursor: 'pointer',
+                  transition: 'all 0.2s'
+                }}
+              >
+                English
+              </button>
+            </div>
+          )}
+
+          <button 
+            className="btn-brochure-back" 
+            onClick={handleDownloadPDF}
+            style={{ 
+              borderColor: 'var(--color-signal-mint)', 
+              color: 'var(--color-signal-mint)',
+              padding: '8px 12px',
+              display: 'flex',
+              alignItems: 'center',
+              justifyContent: 'center'
+            }}
+            title={isAppreciation ? t('Download Appreciation Letter') : t('Download Welcome Letter')}
+          >
+            <i className="bi bi-download" style={{ fontSize: 16 }} />
+          </button>
+        </div>
+      </header>
+      <div style={{ flex: 1, background: '#f5f5f5', overflow: 'auto', display: 'flex', justifyContent: 'center', alignItems: 'flex-start' }}>
+        <iframe
+          id="full-letter-iframe"
+          key={selectedLang}
+          src={letterUrl}
+          style={{ width: '100%', height: selectedLang === 'ta' ? '2400px' : '100%', border: 'none', minHeight: '100%' }}
+          title={isAppreciation ? 'Appreciation Letter' : 'Welcome Letter'}
+          onLoad={(e) => {
+            try {
+              const iframe = e.target;
+              const doc = iframe.contentDocument || iframe.contentWindow.document;
+              const controls = doc.querySelector('.controls-container');
+              if (controls) controls.style.display = 'none';
+
+              const setH = () => {
+                const scrollH = Math.max(
+                  doc.documentElement.scrollHeight,
+                  doc.body ? doc.body.scrollHeight : 0
+                );
+                if (scrollH > 200) {
+                  iframe.style.height = scrollH + 'px';
+                }
+              };
+              setH();
+              setTimeout(setH, 800);  // retry after fonts load
+              setTimeout(setH, 2000); // final retry
+            } catch(err) {}
+          }}
+        />
+      </div>
+    </div>
+  );
+}
+
+function FullBoothPanel({ epicNo, onBack }) {
+  const { t } = useLang()
+  const [boothData, setBoothData] = useState(null)
+  const [loading, setLoading] = useState(true)
+  const [error, setError] = useState(null)
+
+  useEffect(() => {
+    if (!epicNo) {
+      setError(t('No booth data available. Please complete registration first.'))
+      setLoading(false)
+      return
+    }
+    chat.getBooth(epicNo)
+      .then((data) => {
+        setBoothData(data)
+      })
+      .catch((err) => {
+        setError(err.message || t('Unable to load booth information.'))
+      })
+      .finally(() => {
+        setLoading(false)
+      })
+  }, [epicNo])
+
+  const getFieldIcon = (key) => {
+    const k = key.toLowerCase();
+    if (k.includes('assembly_name') || k.includes('assembly_no')) return 'geo-alt';
+    if (k.includes('district')) return 'map';
+    if (k.includes('part_no') || k.includes('part')) return 'person';
+    return 'info-circle';
+  }
+
+
+  const cards = [];
+  if (boothData) {
+    let name = boothData.assembly_name || '';
+    let no = boothData.assembly_no || '';
+
+    if (!no && name) {
+      const match = name.match(/^(\d+)\s*-\s*(.*)$/);
+      if (match) {
+        no = match[1];
+        name = match[2];
+      }
+    }
+
+    const hasVal = (v) => v !== undefined && v !== null && String(v).trim() !== '';
+    if (hasVal(name)) {
+      cards.push({ key: 'assembly_name', label: 'Assembly Name', value: name });
+    }
+    if (hasVal(no)) {
+      cards.push({ key: 'assembly_no', label: 'Assembly No', value: no });
+    }
+    if (hasVal(boothData.district)) {
+      cards.push({ key: 'district', label: 'District', value: boothData.district });
+    }
+    if (hasVal(boothData.part_no)) {
+      cards.push({ key: 'part_no', label: 'Part No', value: boothData.part_no });
+    }
+  }
+
+  return (
+    <div className="chatbot-container brochure-panel">
+      <header className="brochure-header">
+        <div className="brochure-title" style={{ display: 'flex', alignItems: 'center', gap: 10 }}>
+          <button 
+            onClick={onBack}
+            style={{
+              background: 'none',
+              border: 'none',
+              color: 'var(--color-ash)',
+              cursor: 'pointer',
+              padding: '4px 8px 4px 0',
+              fontSize: '18px',
+              display: 'flex',
+              alignItems: 'center',
+              transition: 'color 0.15s'
+            }}
+            onMouseEnter={(e) => e.currentTarget.style.color = 'var(--color-chalk)'}
+            onMouseLeave={(e) => e.currentTarget.style.color = 'var(--color-ash)'}
+            aria-label="Back"
+          >
+            <i className="bi bi-chevron-left" />
+          </button>
+          <i className="bi bi-building brochure-title-orange" />
+          <span>{t('Booth Information')}</span>
+        </div>
+      </header>
+
+      <div className="brochure-content">
+        {loading ? (
+          <div style={{ flex: 1, display: 'flex', alignItems: 'center', justifyContent: 'center', minHeight: 200 }}>
+            <div style={{ width: 32, height: 32, border: '3px solid rgba(46, 204, 113, 0.15)', borderTopColor: 'var(--color-signal-mint)', borderRadius: '50%', animation: 'spin 1s linear infinite' }} />
+          </div>
+        ) : error ? (
+          <div style={{ textAlign: 'center', padding: '40px 20px', color: 'var(--color-ash)' }}>
+            <i className="bi bi-exclamation-triangle" style={{ fontSize: 32, color: '#ff3b30', marginBottom: 12, display: 'block' }} />
+            {error}
+          </div>
+        ) : (
+          <div style={{ 
+            width: '100%', 
+            maxWidth: '640px',
+            margin: '20px auto 0 auto',
+            display: 'flex', 
+            flexDirection: 'column', 
+            alignItems: 'center', 
+            gap: 24,
+            background: 'transparent',
+            border: 'none',
+            borderRadius: 0,
+            padding: '20px 0',
+            boxShadow: 'none'
+          }}>
+            {/* Header Icon & Title */}
+            <div style={{ textAlign: 'center', marginBottom: 8 }}>
+              <div style={{
+                width: 72,
+                height: 72,
+                borderRadius: '50%',
+                background: 'rgba(30, 58, 138, 0.1)',
+                display: 'flex',
+                alignItems: 'center',
+                justifyContent: 'center',
+                margin: '0 auto 12px auto'
+              }}>
+                <i className="bi bi-building" style={{ fontSize: 36, color: '#1E3A8A' }} />
+              </div>
+              <h3 style={{ fontSize: 20, fontWeight: 700, color: 'var(--color-chalk)', marginBottom: 4 }}>{t('Polling Booth Details')}</h3>
+              <p style={{ fontSize: 13, color: 'var(--color-ash)', margin: 0 }}>{t('Registered election booth location and part details')}</p>
+            </div>
+
+            {/* Details Grid */}
+            <div style={{ 
+              width: '100%', 
+              display: 'grid', 
+              gridTemplateColumns: 'repeat(2, 1fr)', 
+              gap: 12 
+            }}>
+              {cards.length > 0 ? cards.map((c) => (
+                <div key={c.key} style={{ 
+                  background: 'var(--color-carbon)', 
+                  border: '1px solid var(--color-graphite)',
+                  borderRadius: 12,
+                  padding: '16px 20px',
+                  display: 'flex',
+                  flexDirection: 'column',
+                  gap: 8
+                }}>
+                  <div style={{ display: 'flex', alignItems: 'center', gap: 8, fontSize: 13, fontWeight: 500, color: 'var(--color-ash)' }}>
+                    <i className={`bi bi-${getFieldIcon(c.key)}`} style={{ color: 'var(--color-accent)', fontSize: 14 }} />
+                    <span>{c.label}</span>
+                  </div>
+                  <span style={{ fontSize: 16, fontWeight: 700, color: 'var(--color-chalk)' }}>{String(c.value)}</span>
+                </div>
+              )) : (
+                <div style={{ gridColumn: 'span 2', textAlign: 'center', padding: '24px', color: 'var(--color-ash)' }}>
+                  {t('No details found.')}
+                </div>
+              )}
+            </div>
+          </div>
+        )}
+      </div>
+    </div>
+  );
+}
+
+function FullProfilePanel({ epicNo, mobile, referredCount, onBack }) {
+  const { t } = useLang()
+  const [profileData, setProfileData] = useState(null)
+  const [loading, setLoading] = useState(true)
+  const [error, setError] = useState(null)
+
+  useEffect(() => {
+    if (!epicNo) {
+      setError(t('No profile data available.'))
+      setLoading(false)
+      return
+    }
+    chat.profile(epicNo, mobile)
+      .then((data) => {
+        setProfileData(data)
+      })
+      .catch((err) => {
+        setError(err.message || t('Unable to load profile.'))
+      })
+      .finally(() => {
+        setLoading(false)
+      })
+  }, [epicNo, mobile])
+
+  return (
+    <div className="chatbot-container brochure-panel">
+      <header className="brochure-header">
+        <div className="brochure-title" style={{ display: 'flex', alignItems: 'center', gap: 10 }}>
+          <button 
+            onClick={onBack}
+            style={{
+              background: 'none',
+              border: 'none',
+              color: 'var(--color-ash)',
+              cursor: 'pointer',
+              padding: '4px 8px 4px 0',
+              fontSize: '18px',
+              display: 'flex',
+              alignItems: 'center',
+              transition: 'color 0.15s'
+            }}
+            onMouseEnter={(e) => e.currentTarget.style.color = 'var(--color-chalk)'}
+            onMouseLeave={(e) => e.currentTarget.style.color = 'var(--color-ash)'}
+            aria-label="Back"
+          >
+            <i className="bi bi-chevron-left" />
+          </button>
+          <i className="bi bi-person-circle brochure-title-orange" />
+          <span>{t('My Profile')}</span>
+        </div>
+      </header>
+
+      <div className="brochure-content">
+        {loading ? (
+          <div style={{ flex: 1, display: 'flex', alignItems: 'center', justifyContent: 'center', minHeight: 200 }}>
+            <div style={{ width: 32, height: 32, border: '3px solid rgba(46, 204, 113, 0.15)', borderTopColor: 'var(--color-signal-mint)', borderRadius: '50%', animation: 'spin 1s linear infinite' }} />
+          </div>
+        ) : error ? (
+          <div style={{ textAlign: 'center', padding: '40px 20px', color: 'var(--color-ash)' }}>
+            <i className="bi bi-exclamation-triangle" style={{ fontSize: 32, color: '#ff3b30', marginBottom: 12, display: 'block' }} />
+            {error}
+          </div>
+        ) : (
+          <div style={{ 
+            width: '100%', 
+            maxWidth: '640px',
+            margin: '20px auto 0 auto',
+            display: 'flex', 
+            flexDirection: 'row', 
+            alignItems: 'center', 
+            gap: 32,
+            background: 'transparent',
+            border: 'none',
+            borderRadius: 0,
+            padding: '20px 0',
+            boxShadow: 'none',
+            flexWrap: 'wrap'
+          }}>
+            {/* Left Column: Avatar & Name */}
+            <div style={{
+              display: 'flex',
+              flexDirection: 'column',
+              alignItems: 'center',
+              gap: 16,
+              width: '160px',
+              margin: '0 auto',
+              textAlign: 'center',
+              flexShrink: 0
+            }}>
+              {/* Profile Photo */}
+              <div style={{ position: 'relative' }}>
+                {profileData.photo_url ? (
+                  <img 
+                    src={profileData.photo_url} 
+                    alt={profileData.name} 
+                    style={{ 
+                      width: 96, 
+                      height: 96, 
+                      borderRadius: '50%', 
+                      objectFit: 'cover', 
+                      border: referredCount >= 5 ? '2.5px solid #1E3A8A' : '2px solid var(--color-graphite)',
+                      boxShadow: referredCount >= 5 ? '0 0 16px rgba(255, 153, 51, 0.35)' : 'none'
+                    }} 
+                  />
+                ) : (
+                  <div style={{ 
+                    width: 96, 
+                    height: 96, 
+                    borderRadius: '50%', 
+                    background: '#252d27', 
+                    display: 'flex', 
+                    alignItems: 'center', 
+                    justifyContent: 'center', 
+                    border: '2px solid var(--color-graphite)' 
+                  }}>
+                    <i className="bi bi-person-fill" style={{ color: 'var(--color-ash)', fontSize: 44 }} />
+                  </div>
+                )}
+              </div>
+
+              <div>
+                <h3 style={{ fontSize: 18, fontWeight: 700, color: 'var(--color-chalk)', marginBottom: 4 }}>{profileData.name || t('Member')}</h3>
+                <p style={{ fontSize: 12, color: 'var(--color-signal-mint)', fontWeight: 600, margin: 0 }}>
+                  {referredCount >= 5 ? t('Volunteer Agent') : t('Registered Member')}
+                </p>
+              </div>
+            </div>
+
+            {/* Right Column: Grid Details */}
+            <div style={{ 
+              flex: 1, 
+              minWidth: '280px', 
+              display: 'grid', 
+              gridTemplateColumns: 'repeat(2, 1fr)', 
+              gap: 12 
+            }}>
+              <div style={{ 
+                background: 'var(--color-carbon)', 
+                border: '1px solid var(--color-graphite)',
+                borderRadius: 12,
+                padding: '10px 14px',
+                display: 'flex',
+                flexDirection: 'column',
+                gap: 4
+              }}>
+                <div style={{ display: 'flex', alignItems: 'center', gap: 6, fontSize: 11, color: 'var(--color-ash)' }}>
+                  <i className="bi bi-hash" style={{ color: '#1E3A8A' }} />
+                  <span>Member Code</span>
+                </div>
+                <span style={{ fontSize: 13, fontWeight: 600, color: 'var(--color-chalk)', fontFamily: 'monospace' }}>{profileData.bjp_code || profileData.ptc_code || 'N/A'}</span>
+              </div>
+
+              <div style={{ 
+                background: 'var(--color-carbon)', 
+                border: '1px solid var(--color-graphite)',
+                borderRadius: 12,
+                padding: '10px 14px',
+                display: 'flex',
+                flexDirection: 'column',
+                gap: 4
+              }}>
+                <div style={{ display: 'flex', alignItems: 'center', gap: 6, fontSize: 11, color: 'var(--color-ash)' }}>
+                  <i className="bi bi-card-text" style={{ color: '#1E3A8A' }} />
+                  <span>EPIC Number</span>
+                </div>
+                <span style={{ fontSize: 13, fontWeight: 600, color: 'var(--color-chalk)', fontFamily: 'monospace' }}>{profileData.epic_no || 'N/A'}</span>
+              </div>
+
+              <div style={{ 
+                background: 'var(--color-carbon)', 
+                border: '1px solid var(--color-graphite)',
+                borderRadius: 12,
+                padding: '10px 14px',
+                display: 'flex',
+                flexDirection: 'column',
+                gap: 4
+              }}>
+                <div style={{ display: 'flex', alignItems: 'center', gap: 6, fontSize: 11, color: 'var(--color-ash)' }}>
+                  <i className="bi bi-phone" style={{ color: '#1E3A8A' }} />
+                  <span>Mobile Number</span>
+                </div>
+                <span style={{ fontSize: 13, fontWeight: 600, color: 'var(--color-chalk)', fontFamily: 'monospace' }}>{profileData.mobile || mobile || 'N/A'}</span>
+              </div>
+
+              <div style={{ 
+                background: 'var(--color-carbon)', 
+                border: '1px solid var(--color-graphite)',
+                borderRadius: 12,
+                padding: '10px 14px',
+                display: 'flex',
+                flexDirection: 'column',
+                gap: 4
+              }}>
+                <div style={{ display: 'flex', alignItems: 'center', gap: 6, fontSize: 11, color: 'var(--color-ash)' }}>
+                  <i className="bi bi-geo" style={{ color: '#1E3A8A' }} />
+                  <span>State</span>
+                </div>
+                <span style={{ fontSize: 13, fontWeight: 600, color: 'var(--color-chalk)' }}>{t('Tamil Nadu')}</span>
+              </div>
+
+              <div style={{ 
+                background: 'var(--color-carbon)', 
+                border: '1px solid var(--color-graphite)',
+                borderRadius: 12,
+                padding: '10px 14px',
+                display: 'flex',
+                flexDirection: 'column',
+                gap: 4
+              }}>
+                <div style={{ display: 'flex', alignItems: 'center', gap: 6, fontSize: 11, color: 'var(--color-ash)' }}>
+                  <i className="bi bi-geo-alt" style={{ color: '#1E3A8A' }} />
+                  <span>Assembly</span>
+                </div>
+                <span style={{ fontSize: 13, fontWeight: 600, color: 'var(--color-chalk)', whiteSpace: 'nowrap', overflow: 'hidden', textOverflow: 'ellipsis' }} title={profileData.assembly}>{profileData.assembly || 'N/A'}</span>
+              </div>
+
+              <div style={{ 
+                background: 'var(--color-carbon)', 
+                border: '1px solid var(--color-graphite)',
+                borderRadius: 12,
+                padding: '10px 14px',
+                display: 'flex',
+                flexDirection: 'column',
+                gap: 4
+              }}>
+                <div style={{ display: 'flex', alignItems: 'center', gap: 6, fontSize: 11, color: 'var(--color-ash)' }}>
+                  <i className="bi bi-map" style={{ color: '#1E3A8A' }} />
+                  <span>District</span>
+                </div>
+                <span style={{ fontSize: 13, fontWeight: 600, color: 'var(--color-chalk)', whiteSpace: 'nowrap', overflow: 'hidden', textOverflow: 'ellipsis' }} title={profileData.district}>{profileData.district || 'N/A'}</span>
+              </div>
+
+              <div style={{ 
+                background: 'rgba(46,204,113,0.04)', 
+                border: '1px solid rgba(46,204,113,0.1)',
+                borderRadius: 12,
+                padding: 14,
+                display: 'flex',
+                justifyContent: 'space-between',
+                alignItems: 'center',
+                gridColumn: 'span 2'
+              }}>
+                <div style={{ display: 'flex', alignItems: 'center', gap: 8 }}>
+                  <i className="bi bi-people-fill" style={{ color: 'var(--color-signal-mint)', fontSize: 16 }} />
+                  <span style={{ fontSize: 13, fontWeight: 600, color: 'var(--color-chalk)' }}>{t('Total Referrals')}</span>
+                </div>
+                <span style={{ fontSize: 18, fontWeight: 800, color: 'var(--color-signal-mint)' }}>{referredCount}</span>
+              </div>
+            </div>
+          </div>
+        )}
+      </div>
+      <style>{`
+        @keyframes spin {
+          to { transform: rotate(360deg); }
+        }
+      `}</style>
+    </div>
+  );
+}
+
+function FullMyMembersPanel({ bjpCode, onBack }) {
+  const { t } = useLang()
+  const [root, setRoot] = useState(null)
+  const [tree, setTree] = useState([])
+  const [loading, setLoading] = useState(true)
+  const [error, setError] = useState(null)
+  const [selectedMember, setSelectedMember] = useState(null)
+
+  // Incremental reveal: show 5 at a time, then a "+N" chip to load 5 more.
+  const PAGE = 5
+  const [l2Visible, setL2Visible] = useState(PAGE)          // L2 (direct) count shown
+  const [l3Visible, setL3Visible] = useState({})            // { [parentCode]: count } for L3
+
+  const getL3Count = (code) => l3Visible[code] || PAGE
+  const showMoreL3 = (code) =>
+    setL3Visible((prev) => ({ ...prev, [code]: (prev[code] || PAGE) + PAGE }))
+
+  useEffect(() => {
+    if (!bjpCode) {
+      setError(t('No referral code available.'))
+      setLoading(false)
+      return
+    }
+    chat.getMyMembers(bjpCode)
+      .then((data) => {
+        setRoot(data.root || null)
+        setTree(data.tree || [])
+      })
+      .catch((err) => {
+        setError(err.message || t('Unable to load referred members.'))
+      })
+      .finally(() => {
+        setLoading(false)
+      })
+  }, [bjpCode])
+
+  const directCount = tree.length
+  const indirectCount = tree.reduce((acc, curr) => acc + (curr.referrals?.length || 0), 0)
+  const totalCount = directCount + indirectCount
+
+  // Circular "+N" chip that reveals more nodes on click.
+  const renderMoreChip = (remaining, onClick, level) => {
+    const ringColor = level === 2 ? 'var(--color-signal-mint)' : '#17a2b8'
+    return (
+      <div
+        onClick={onClick}
+        role="button"
+        title={t('Show {count} more', { count: Math.min(remaining, PAGE) })}
+        style={{
+          display: 'flex',
+          alignItems: 'center',
+          justifyContent: 'center',
+          flexShrink: 0,
+          width: 40,
+          height: 40,
+          borderRadius: '50%',
+          background: 'var(--color-carbon)',
+          border: `1.5px dashed ${ringColor}`,
+          color: ringColor,
+          fontSize: 12,
+          fontWeight: 700,
+          cursor: 'pointer',
+          zIndex: 3,
+          transition: 'all 0.15s ease'
+        }}
+        onMouseEnter={(e) => { e.currentTarget.style.transform = 'scale(1.08)' }}
+        onMouseLeave={(e) => { e.currentTarget.style.transform = 'none' }}
+      >
+        +{remaining}
+      </div>
+    )
+  }
+
+  const renderNode = (member, level) => {
+    const isRoot = level === 1
+    const nodeWidth = isRoot ? '200px' : '170px'
+    
+    return (
+      <div key={member.bjp_code} className={`tree-node level-${level}`} style={{
+        display: 'flex',
+        alignItems: 'center',
+        position: 'relative',
+        zIndex: 2,
+        flexShrink: 0
+      }}>
+        {/* Node card inner */}
+        <div 
+          onClick={() => setSelectedMember(member)}
+          style={{
+            display: 'flex',
+            alignItems: 'center',
+            gap: 10,
+            padding: '8px 12px',
+            background: 'var(--color-carbon)',
+            border: isRoot ? '2px solid #1E3A8A' : '1px solid var(--color-graphite)',
+            borderRadius: '12px',
+            cursor: 'pointer',
+            width: nodeWidth,
+            boxShadow: '0 4px 15px rgba(0,0,0,0.1)',
+            transition: 'all 0.15s ease',
+            zIndex: 3
+          }}
+          onMouseEnter={(e) => {
+            e.currentTarget.style.borderColor = isRoot ? '#1E3A8A' : 'var(--color-signal-mint)';
+            e.currentTarget.style.transform = 'translateY(-1px)';
+          }}
+          onMouseLeave={(e) => {
+            e.currentTarget.style.borderColor = isRoot ? '#1E3A8A' : 'var(--color-graphite)';
+            e.currentTarget.style.transform = 'none';
+          }}
+        >
+          {/* Photo */}
+          <div style={{ position: 'relative', flexShrink: 0 }}>
+            {member.photo_url ? (
+              <img src={member.photo_url} crossOrigin="anonymous" alt={member.name} style={{ width: 32, height: 32, borderRadius: '50%', objectFit: 'cover', border: '1px solid var(--color-graphite)' }} />
+            ) : (
+              <div style={{ width: 32, height: 32, borderRadius: '50%', background: '#252d27', display: 'flex', alignItems: 'center', justifyContent: 'center', border: '1px solid var(--color-graphite)' }}>
+                <i className="bi bi-person-fill" style={{ color: 'var(--color-ash)', fontSize: 14 }} />
+              </div>
+            )}
+            <span style={{
+              position: 'absolute',
+              bottom: -3,
+              right: -3,
+              width: 14,
+              height: 14,
+              borderRadius: '50%',
+              background: '#2ecc71',
+              color: '#000',
+              fontSize: 8,
+              fontWeight: 'bold',
+              display: 'flex',
+              alignItems: 'center',
+              justifyContent: 'center'
+            }}>L{level}</span>
+          </div>
+
+          {/* Details */}
+          <div style={{ display: 'flex', flexDirection: 'column', flex: 1, minWidth: 0, textAlign: 'left' }}>
+            <span style={{ fontSize: 11, fontWeight: 'bold', color: 'var(--color-chalk)', whiteSpace: 'nowrap', overflow: 'hidden', textOverflow: 'ellipsis' }}>{member.name}</span>
+            <span style={{ fontSize: 9, color: 'var(--color-signal-mint)', fontFamily: 'monospace', fontWeight: 600 }}>{member.bjp_code}</span>
+          </div>
+
+          <i className="bi bi-chevron-right" style={{ color: 'var(--color-ash)', fontSize: 10, flexShrink: 0 }} />
+        </div>
+      </div>
+    )
+  }
+
+  return (
+    <div className="chatbot-container brochure-panel">
+      <header className="brochure-header">
+        <div className="brochure-title" style={{ display: 'flex', alignItems: 'center', gap: 10 }}>
+          <button 
+            onClick={onBack}
+            style={{
+              background: 'none',
+              border: 'none',
+              color: 'var(--color-ash)',
+              cursor: 'pointer',
+              padding: '4px 8px 4px 0',
+              fontSize: '18px',
+              display: 'flex',
+              alignItems: 'center',
+              transition: 'color 0.15s'
+            }}
+            onMouseEnter={(e) => e.currentTarget.style.color = 'var(--color-chalk)'}
+            onMouseLeave={(e) => e.currentTarget.style.color = 'var(--color-ash)'}
+            aria-label="Back"
+          >
+            <i className="bi bi-chevron-left" />
+          </button>
+          <i className="bi bi-people-fill brochure-title-orange" />
+          <span>{t('My Members')}</span>
+        </div>
+      </header>
+
+      <div className="brochure-content" style={{ display: 'flex', flexDirection: 'column', gap: 16 }}>
+        {loading ? (
+          <div style={{ flex: 1, display: 'flex', alignItems: 'center', justifyContent: 'center', minHeight: 200 }}>
+            <div style={{ width: 32, height: 32, border: '3px solid rgba(46, 204, 113, 0.15)', borderTopColor: 'var(--color-signal-mint)', borderRadius: '50%', animation: 'spin 1s linear infinite' }} />
+          </div>
+        ) : error ? (
+          <div style={{ textAlign: 'center', padding: '40px 20px', color: 'var(--color-ash)' }}>
+            <i className="bi bi-exclamation-triangle" style={{ fontSize: 32, color: '#ff3b30', marginBottom: 12, display: 'block' }} />
+            {error}
+          </div>
+        ) : (
+          <div style={{ width: '100%', margin: '0 auto', display: 'flex', flexDirection: 'column', gap: 16 }}>
+            {/* Stats bar */}
+            <div style={{ fontSize: 12, color: 'var(--color-signal-mint)', fontWeight: 600, borderBottom: '1px solid var(--color-graphite)', paddingBottom: 12 }}>
+              {t('Referral Tree Network — {directCount} Direct | {indirectCount} Indirect ({totalCount} Total)', { directCount, indirectCount, totalCount })}
+            </div>
+
+            {/* Tree Container (Left-to-Right layout) */}
+            <div style={{ 
+              background: 'var(--color-carbon)', 
+              border: '1px solid var(--color-graphite)', 
+              borderRadius: 20, 
+              padding: '24px 16px', 
+              display: 'flex', 
+              alignItems: 'center',
+              minHeight: '350px',
+              overflowX: 'auto',
+              overflowY: 'auto',
+              gap: '32px',
+              position: 'relative'
+            }}>
+              {/* LAYER 1: ROOT */}
+              <div style={{ display: 'flex', alignItems: 'center', position: 'relative' }}>
+                {root && renderNode(root, 1)}
+                {/* Horizontal connection line to L2 column */}
+                {tree.length > 0 && (
+                  <div style={{
+                    width: '32px',
+                    height: '2px',
+                    background: 'var(--color-graphite)',
+                    flexShrink: 0
+                  }} />
+                )}
+              </div>
+
+              {/* LAYERS 2 & 3 */}
+              {tree.length === 0 ? (
+                <div style={{ textAlign: 'center', padding: '32px 16px', color: 'var(--color-ash)', flexShrink: 0, width: 'min(280px, 72vw)' }}>
+                  <i className="bi bi-diagram-3" style={{ fontSize: 48, color: 'var(--color-graphite)', marginBottom: 16, display: 'block' }} />
+                  <h3 style={{ fontSize: 16, fontWeight: 600, color: 'var(--color-chalk)', marginBottom: 8 }}>{t('Tree structure empty')}</h3>
+                  <p style={{ fontSize: 13, margin: 0, color: 'var(--color-ash)', lineHeight: 1.6, wordBreak: 'normal', overflowWrap: 'anywhere' }}>
+                    {t("You haven't referred anyone yet. Share your unique Member Code and grow your support network!")}
+                  </p>
+                </div>
+              ) : (
+                <div style={{ display: 'flex', flexDirection: 'column', gap: '24px', position: 'relative' }}>
+                  
+                  {/* Vertical connecting line spanning from first to last L2 node */}
+                  {tree.length > 1 && (
+                    <div style={{
+                      position: 'absolute',
+                      left: '-16px',
+                      top: '25px', // Center of first L2 row
+                      bottom: '25px', // Center of last L2 row
+                      width: '2px',
+                      background: 'var(--color-graphite)',
+                      zIndex: 1
+                    }} />
+                  )}
+
+                  {/* Stack of Rows (show 5 at a time) */}
+                  {tree.slice(0, l2Visible).map(parent => {
+                    const hasChildren = parent.referrals && parent.referrals.length > 0
+                    return (
+                      <div key={parent.bjp_code} style={{
+                        display: 'flex',
+                        alignItems: 'center',
+                        position: 'relative',
+                        gap: '24px'
+                      }}>
+                        {/* Horizontal link from L2 vertical line to L2 Node */}
+                        <div style={{
+                          position: 'absolute',
+                          left: '-16px',
+                          top: '50%',
+                          width: '16px',
+                          height: '2px',
+                          background: 'var(--color-graphite)',
+                          transform: 'translateY(-50%)',
+                          zIndex: 1
+                        }} />
+
+                        {renderNode(parent, 2)}
+
+                        {hasChildren && (
+                          <div style={{
+                            width: '24px',
+                            height: '2px',
+                            background: 'var(--color-graphite)',
+                            flexShrink: 0
+                          }} />
+                        )}
+
+                        {hasChildren && (
+                          <div style={{
+                            display: 'flex',
+                            alignItems: 'center',
+                            gap: '16px',
+                            position: 'relative'
+                          }}>
+                            {parent.referrals.length > 1 && (
+                              <div style={{
+                                position: 'absolute',
+                                left: '0px',
+                                right: '85px', // Stops at center of last node
+                                height: '2px',
+                                background: 'var(--color-graphite)',
+                                top: '50%',
+                                transform: 'translateY(-50%)',
+                                zIndex: 1
+                              }} />
+                            )}
+
+                            {parent.referrals.slice(0, getL3Count(parent.bjp_code)).map(child => (
+                              <div key={child.bjp_code} style={{ display: 'flex', alignItems: 'center', gap: '16px', position: 'relative' }}>
+                                {renderNode(child, 3)}
+                              </div>
+                            ))}
+
+                            {/* L3 "+N" — reveal 5 more children of this L2 parent */}
+                            {parent.referrals.length > getL3Count(parent.bjp_code) &&
+                              renderMoreChip(
+                                parent.referrals.length - getL3Count(parent.bjp_code),
+                                () => showMoreL3(parent.bjp_code),
+                                3
+                              )}
+                          </div>
+                        )}
+                      </div>
+                    )
+                  })}
+
+                  {/* L2 "+N" — reveal 5 more direct referrals */}
+                  {tree.length > l2Visible && (
+                    <div style={{ display: 'flex', alignItems: 'center', position: 'relative', paddingLeft: 0 }}>
+                      {/* Horizontal link from the L2 vertical line to the chip */}
+                      <div style={{
+                        position: 'absolute',
+                        left: '-16px',
+                        top: '50%',
+                        width: '16px',
+                        height: '2px',
+                        background: 'var(--color-graphite)',
+                        transform: 'translateY(-50%)',
+                        zIndex: 1
+                      }} />
+                      {renderMoreChip(tree.length - l2Visible, () => setL2Visible((v) => v + PAGE), 2)}
+                    </div>
+                  )}
+                </div>
+              )}
+            </div>
+          </div>
+        )}
+      </div>
+
+      {/* MEMBER DETAILS MODAL */}
+      {selectedMember && (
+        <div style={{
+          position: 'fixed',
+          inset: 0,
+          background: 'rgba(0,0,0,0.85)',
+          backdropFilter: 'blur(8px)',
+          display: 'flex',
+          alignItems: 'center',
+          justifyContent: 'center',
+          zIndex: 999,
+          padding: 16
+        }} onClick={() => setSelectedMember(null)}>
+          <div style={{
+            background: 'var(--color-carbon)',
+            border: '1.5px solid var(--color-graphite)',
+            borderRadius: 24,
+            width: '100%',
+            maxWidth: '460px',
+            maxHeight: '90vh',
+            overflowY: 'auto',
+            padding: '24px',
+            position: 'relative'
+          }} onClick={(e) => e.stopPropagation()}>
+            <button 
+              onClick={() => setSelectedMember(null)}
+              style={{
+                position: 'absolute',
+                top: 16,
+                right: 16,
+                background: 'transparent',
+                border: 'none',
+                color: 'var(--color-ash)',
+                fontSize: 22,
+                cursor: 'pointer'
+              }}
+            >
+              <i className="bi bi-x-lg" />
+            </button>
+
+            <h3 style={{ fontSize: 16, fontWeight: 'bold', color: 'var(--color-chalk)', marginBottom: 20 }}>{t('Member Details')}</h3>
+
+            <div style={{ display: 'flex', justifyContent: 'center', marginBottom: 20 }}>
+              <FlipCard3D
+                cardData={{
+                  name: selectedMember.name,
+                  epic_no: selectedMember.epic_no,
+                  assembly_name: selectedMember.assembly_name,
+                  district: selectedMember.district,
+                  part_no: selectedMember.part_no,
+                  bjp_code: selectedMember.bjp_code,
+                  photo_url: selectedMember.photo_url
+                }}
+                width={300}
+                autoFlip={false}
+                showActions={false}
+              />
+            </div>
+
+            <div style={{
+              background: '#f9f8f6',
+              border: '1px solid #E2E8F0',
+              borderRadius: 16,
+              padding: 16,
+              display: 'flex',
+              flexDirection: 'column',
+              gap: 12
+            }}>
+              <div style={{ display: 'flex', justifyContent: 'space-between', fontSize: 13 }}>
+                <span style={{ color: '#555555' }}>Member Name</span>
+                <span style={{ color: '#111111', fontWeight: 600 }}>{selectedMember.name}</span>
+              </div>
+              <div style={{ display: 'flex', justifyContent: 'space-between', fontSize: 13 }}>
+                <span style={{ color: '#555555' }}>EPIC Number</span>
+                <span style={{ color: '#111111', fontFamily: 'monospace', fontWeight: 600 }}>{selectedMember.epic_no || '—'}</span>
+              </div>
+              <div style={{ display: 'flex', justifyContent: 'space-between', fontSize: 13 }}>
+                <span style={{ color: '#555555' }}>Member Code</span>
+                <span style={{ color: '#1E3A8A', fontFamily: 'monospace', fontWeight: 700 }}>{selectedMember.bjp_code}</span>
+              </div>
+              <div style={{ display: 'flex', justifyContent: 'space-between', fontSize: 13 }}>
+                <span style={{ color: '#555555' }}>Assembly (Booth)</span>
+                <span style={{ color: '#111111', fontWeight: 600 }}>
+                  {selectedMember.assembly_name ? `${selectedMember.assembly_name} (Part ${selectedMember.part_no || '—'})` : '—'}
+                </span>
+              </div>
+              <div style={{ display: 'flex', justifyContent: 'space-between', fontSize: 13 }}>
+                <span style={{ color: '#555555' }}>District</span>
+                <span style={{ color: '#111111', fontWeight: 600 }}>{selectedMember.district || '—'}</span>
+              </div>
+              {selectedMember.generated_at && (
+                <div style={{ display: 'flex', justifyContent: 'space-between', fontSize: 13 }}>
+                  <span style={{ color: '#555555' }}>Joined Date</span>
+                  <span style={{ color: '#111111', fontWeight: 600 }}>{new Date(selectedMember.generated_at).toLocaleDateString()}</span>
+                </div>
+              )}
+            </div>
+          </div>
+        </div>
+      )}
+    </div>
+  )
+}
+
+function LocalBodyPanel({ onBack, localBodyInterest, handleLocalBodyInterestSubmit }) {
+  const { t } = useLang()
+  const isLocked = localBodyInterest === 'interested' || localBodyInterest === 'not_interested';
+
+  const handleClick = (value) => {
+    if (isLocked) return;
+    const confirmMsg = value === 'interested'
+      ? t('Are you sure you want to submit "Interested"? This selection cannot be changed later.')
+      : t('Are you sure you want to submit "Not Interested"? This selection cannot be changed later.');
+    
+    if (window.confirm(confirmMsg)) {
+      handleLocalBodyInterestSubmit(value);
+    }
+  };
+
+  return (
+    <div className="chatbot-container brochure-panel">
+      <header className="brochure-header">
+        <div className="brochure-title" style={{ display: 'flex', alignItems: 'center', gap: 10 }}>
+          <button 
+            onClick={onBack}
+            style={{
+              background: 'none',
+              border: 'none',
+              color: 'var(--color-ash)',
+              cursor: 'pointer',
+              padding: '4px 8px 4px 0',
+              fontSize: '18px',
+              display: 'flex',
+              alignItems: 'center',
+              transition: 'color 0.15s'
+            }}
+            onMouseEnter={(e) => e.currentTarget.style.color = 'var(--color-chalk)'}
+            onMouseLeave={(e) => e.currentTarget.style.color = 'var(--color-ash)'}
+            aria-label="Back"
+          >
+            <i className="bi bi-chevron-left" />
+          </button>
+          <i className="bi bi-check-square-fill brochure-title-orange" />
+          <span>{t('Local Body Election')}</span>
+        </div>
+      </header>
+
+      <div className="brochure-scroll" style={{ padding: '24px 20px', display: 'flex', flexDirection: 'column', gap: 20 }}>
+        <div style={{
+          background: 'var(--color-carbon)',
+          border: '1px solid var(--color-graphite)',
+          borderRadius: 16,
+          padding: '24px 20px',
+          display: 'flex',
+          flexDirection: 'column',
+          alignItems: 'center',
+          textAlign: 'center',
+          gap: 16
+        }}>
+          <div style={{
+            fontSize: 48,
+            background: 'rgba(255, 153, 51, 0.1)',
+            width: 80,
+            height: 80,
+            borderRadius: '50%',
+            display: 'flex',
+            alignItems: 'center',
+            justifyContent: 'center',
+            marginBottom: 8
+          }}>
+            🗳️
+          </div>
+          
+          <h2 style={{ fontSize: 20, fontWeight: 700, color: 'var(--color-chalk)' }}>
+            {t('Local Body Elections')}
+          </h2>
+          
+          <p style={{ fontSize: 13, lineHeight: '1.6', color: 'var(--color-ash)', maxWidth: 400 }}>
+            {t('Our Organization is preparing a database of active members who are interested in contesting, organizing, or coordinating local initiatives for the upcoming local body elections.')}
+          </p>
+
+          <div style={{
+            width: '100%',
+            height: '1px',
+            background: 'var(--color-graphite)',
+            margin: '8px 0'
+          }} />
+
+          <p style={{ fontSize: 14, fontWeight: 600, color: 'var(--color-chalk)' }}>
+            {t('Are you interested in participating or contesting in the upcoming Local Body Elections?')}
+          </p>
+
+          <div style={{ display: 'flex', gap: 16, width: '100%', marginTop: 8, justifyContent: 'center' }}>
+            <button
+              onClick={() => handleClick('interested')}
+              disabled={isLocked}
+              style={{
+                padding: '12px 24px',
+                borderRadius: 10,
+                border: 'none',
+                fontWeight: 600,
+                cursor: isLocked ? 'not-allowed' : 'pointer',
+                display: 'flex',
+                alignItems: 'center',
+                gap: 8,
+                background: localBodyInterest === 'interested' ? '#2ecc71' : 'var(--color-graphite)',
+                color: localBodyInterest === 'interested' ? '#FFF' : 'var(--color-ash)',
+                opacity: isLocked && localBodyInterest !== 'interested' ? 0.4 : 1,
+                transition: 'all 0.2s'
+              }}
+            >
+              {localBodyInterest === 'interested' ? (
+                <>
+                  <i className="bi bi-check-circle-fill" style={{ fontSize: 16 }} />
+                  {t('Interested')}
+                </>
+              ) : (
+                t('Interested')
+              )}
+            </button>
+            <button
+              onClick={() => handleClick('not_interested')}
+              disabled={isLocked}
+              style={{
+                padding: '12px 24px',
+                borderRadius: 10,
+                border: 'none',
+                fontWeight: 600,
+                cursor: isLocked ? 'not-allowed' : 'pointer',
+                display: 'flex',
+                alignItems: 'center',
+                gap: 8,
+                background: localBodyInterest === 'not_interested' ? '#e74c3c' : 'var(--color-graphite)',
+                color: localBodyInterest === 'not_interested' ? '#FFF' : 'var(--color-ash)',
+                opacity: isLocked && localBodyInterest !== 'not_interested' ? 0.4 : 1,
+                transition: 'all 0.2s'
+              }}
+            >
+              {localBodyInterest === 'not_interested' ? (
+                <>
+                  <i className="bi bi-x-circle-fill" style={{ fontSize: 16 }} />
+                  {t('Not Interested')}
+                </>
+              ) : (
+                t('Not Interested')
+              )}
+            </button>
+          </div>
+
+          {localBodyInterest && (
+            <div style={{
+              marginTop: 16,
+              padding: '12px 16px',
+              borderRadius: 8,
+              background: 'rgba(255, 153, 51, 0.05)',
+              border: '1px solid rgba(255, 153, 51, 0.15)',
+              color: '#1E3A8A',
+              fontSize: 13,
+              fontWeight: 500,
+              maxWidth: 400,
+              lineHeight: '1.5'
+            }}>
+              {localBodyInterest === 'interested' 
+                ? t('🎉 Your interest has been submitted! Our election coordinators will reach out to you.')
+                : t('Thank you for letting us know. You can change your selection at any time.')}
+            </div>
+          )}
+        </div>
+      </div>
+    </div>
+  )
+}
+
+function FullCardPanel({ card, onBack }) {
+  const { t } = useLang()
+  const c = card || {}
+  const [fullCardData, setFullCardData] = useState(null)
+  const cardRef3D = useRef(null)
+  const [cardWidth, setCardWidth] = useState(Math.min(540, window.innerWidth - 48))
+
+  useEffect(() => {
+    const handleResize = () => {
+      setCardWidth(Math.min(540, window.innerWidth - 48))
+    }
+    window.addEventListener('resize', handleResize)
+    return () => window.removeEventListener('resize', handleResize)
+  }, [])
+
+  useEffect(() => {
+    const hasName = c.name || c.voter_name || c.VOTER_NAME;
+    const hasAssembly = c.assembly_name || c.assembly || c.ASSEMBLY_NAME;
+    if (hasName && hasAssembly) {
+      setFullCardData(c)
+    } else if (c.epic_no) {
+      publicApi.getCardData(c.bjp_code || c.epic_no)
+        .then((data) => setFullCardData(data))
+        .catch(() => setFullCardData(c))
+    }
+  }, [c])
+
+  return (
+    <div className="chatbot-container brochure-panel">
+      <header className="brochure-header">
+        <div className="brochure-title" style={{ display: 'flex', alignItems: 'center', gap: 10 }}>
+          <button 
+            onClick={onBack}
+            style={{
+              background: 'none',
+              border: 'none',
+              color: 'var(--color-ash)',
+              cursor: 'pointer',
+              padding: '4px 8px 4px 0',
+              fontSize: '18px',
+              display: 'flex',
+              alignItems: 'center',
+              transition: 'color 0.15s'
+            }}
+            onMouseEnter={(e) => e.currentTarget.style.color = 'var(--color-chalk)'}
+            onMouseLeave={(e) => e.currentTarget.style.color = 'var(--color-ash)'}
+            aria-label="Back"
+          >
+            <i className="bi bi-chevron-left" />
+          </button>
+          <i className="bi bi-credit-card-2-front brochure-title-orange" />
+          <span>{t('My Member Card')}</span>
+        </div>
+        <div style={{ display: 'flex', gap: 12 }}>
+          <button 
+            className="btn-brochure-back" 
+            onClick={() => cardRef3D.current?.download()}
+            style={{ 
+              borderColor: 'var(--color-signal-mint)', 
+              color: 'var(--color-signal-mint)',
+              padding: '8px 12px',
+              display: 'flex',
+              alignItems: 'center',
+              justifyContent: 'center'
+            }}
+            title={t('Download ID Card')}
+          >
+            <i className="bi bi-download" style={{ fontSize: 16 }} />
+          </button>
+        </div>
+      </header>
+
+      <div className="brochure-content" style={{ display: 'flex', flexDirection: 'column', alignItems: 'center', justifyContent: 'center', gap: 24, padding: '40px 20px', minHeight: 400 }}>
+        {fullCardData ? (
+          <>
+            <FlipCard3D
+              ref={cardRef3D}
+              cardData={fullCardData}
+              backUrl={c.back_url || fullCardData.back_url}
+              width={cardWidth}
+              autoFlip={false}
+              showActions={false}
+            />
+            <div style={{ color: 'var(--color-ash)', fontSize: 13, textAlign: 'center', maxWidth: 360, marginTop: 12 }}>
+              <i className="bi bi-info-circle-fill" style={{ color: '#1E3A8A', marginRight: 6 }} />
+              {t('Hover or click on the card to flip it and view the backside voter details.')}
+            </div>
+          </>
+        ) : (
+          <div style={{ width: 32, height: 32, border: '3px solid rgba(46, 204, 113, 0.15)', borderTopColor: 'var(--color-signal-mint)', borderRadius: '50%', animation: 'spin 1s linear infinite' }} />
+        )}
+      </div>
+    </div>
+  );
+}
+
+function FullFormPanel({ title, icon, onBack, children }) {
+  const { t } = useLang()
+  return (
+    <div className="chatbot-container brochure-panel">
+      <header className="brochure-header">
+        <div className="brochure-title" style={{ display: 'flex', alignItems: 'center', gap: 10 }}>
+          <button 
+            onClick={onBack}
+            style={{
+              background: 'none',
+              border: 'none',
+              color: 'var(--color-ash)',
+              cursor: 'pointer',
+              padding: '4px 8px 4px 0',
+              fontSize: '18px',
+              display: 'flex',
+              alignItems: 'center',
+              transition: 'color 0.15s'
+            }}
+            onMouseEnter={(e) => e.currentTarget.style.color = 'var(--color-chalk)'}
+            onMouseLeave={(e) => e.currentTarget.style.color = 'var(--color-ash)'}
+            aria-label="Back"
+          >
+            <i className="bi bi-chevron-left" />
+          </button>
+          <i className={`bi bi-${icon} brochure-title-orange`} />
+          <span>{t(title)}</span>
+        </div>
+      </header>
+
+      <div className="brochure-content" style={{ display: 'flex', flexDirection: 'column', alignItems: 'center', justifyContent: 'flex-start', padding: '20px', overflowY: 'auto' }}>
+        {children}
+      </div>
+    </div>
+  );
+}
+
+function BestPerformersPanel({ onBack }) {
+  const { t } = useLang()
+  const [performers, setPerformers] = useState([]);
+  const [loading, setLoading] = useState(true);
+  const [error, setError] = useState(null);
+  const [selectedMember, setSelectedMember] = useState(null);
+
+  useEffect(() => {
+    chat.getBestPerformers()
+      .then((data) => {
+        setPerformers(data.performers || []);
+      })
+      .catch((err) => {
+        setError(err.message || t('Unable to load leaderboard.'));
+      })
+      .finally(() => {
+        setLoading(false);
+      });
+  }, []);
+
+  return (
+    <div className="chatbot-container brochure-panel">
+      <header className="brochure-header">
+        <div className="brochure-title" style={{ display: 'flex', alignItems: 'center', gap: 10 }}>
+          <button 
+            onClick={onBack}
+            style={{
+              background: 'none',
+              border: 'none',
+              color: 'var(--color-ash)',
+              cursor: 'pointer',
+              padding: '4px 8px 4px 0',
+              fontSize: '18px',
+              display: 'flex',
+              alignItems: 'center',
+              transition: 'color 0.15s'
+            }}
+            onMouseEnter={(e) => e.currentTarget.style.color = 'var(--color-chalk)'}
+            onMouseLeave={(e) => e.currentTarget.style.color = 'var(--color-ash)'}
+            aria-label="Back"
+          >
+            <i className="bi bi-chevron-left" />
+          </button>
+          <i className="bi bi-trophy-fill brochure-title-orange" />
+          <span>{t('Best Performers')}</span>
+        </div>
+      </header>
+
+      <div className="brochure-content">
+        {loading ? (
+          <div style={{ flex: 1, display: 'flex', alignItems: 'center', justifyContent: 'center', minHeight: 200 }}>
+            <div style={{ width: 32, height: 32, border: '3px solid rgba(46, 204, 113, 0.15)', borderTopColor: 'var(--color-signal-mint)', borderRadius: '50%', animation: 'spin 1s linear infinite' }} />
+          </div>
+        ) : error ? (
+          <div style={{ textAlign: 'center', padding: '40px 20px', color: 'var(--color-ash)' }}>
+            <i className="bi bi-exclamation-triangle" style={{ fontSize: 32, color: '#ff3b30', marginBottom: 12, display: 'block' }} />
+            {error}
+          </div>
+        ) : (
+          <div style={{ display: 'flex', flexDirection: 'column', gap: 16 }}>
+            <div style={{ textAlign: 'center', padding: '10px 0' }}>
+              <h2 style={{ fontSize: 18, fontWeight: 700, color: 'var(--color-chalk)', marginBottom: 6 }}>{t('Referral Champions 👑')}</h2>
+              <p style={{ fontSize: 13, color: 'var(--color-ash)', maxWidth: 440, margin: '0 auto' }}>
+                {t('Leading volunteers who are driving local outreach and expanding our digital footprint across Tamil Nadu.')}
+              </p>
+            </div>
+
+            {performers.length === 0 ? (
+              <div style={{ textAlign: 'center', padding: '40px 20px', color: 'var(--color-ash)' }}>
+                <i className="bi bi-people-fill" style={{ fontSize: 40, color: 'var(--color-graphite)', marginBottom: 12, display: 'block' }} />
+                <p>{t('No referrals recorded yet. Be the first performer!')}</p>
+              </div>
+            ) : (
+              performers.map((p, index) => {
+                const rank = index + 1;
+                const isFirst = rank === 1;
+                const medalColor = rank === 2 ? '#c0c0c0' : rank === 3 ? '#cd7f32' : 'var(--color-ash)';
+
+                return (
+                  <div 
+                    key={p.bjp_code}
+                    onClick={() => setSelectedMember(p)}
+                    style={{
+                      display: 'flex',
+                      alignItems: 'center',
+                      gap: 14,
+                      padding: '12px 16px',
+                      background: isFirst
+                        ? 'linear-gradient(90deg, rgba(255,193,7,0.16), var(--color-carbon) 70%)'
+                        : 'var(--color-carbon)',
+                      border: isFirst ? '1.5px solid #FFC107' : '1px solid var(--color-graphite)',
+                      borderRadius: '14px',
+                      cursor: 'pointer',
+                      transition: 'all 0.15s ease'
+                    }}
+                  >
+                    {/* Rank — gold crown for #1, medal circles for #2/#3 */}
+                    <div style={{ width: 30, display: 'flex', alignItems: 'center', justifyContent: 'center', flexShrink: 0 }}>
+                      {isFirst ? (
+                        <svg width="26" height="26" viewBox="0 0 24 24" fill="#FFC107" xmlns="http://www.w3.org/2000/svg" style={{ filter: 'drop-shadow(0 1px 2px rgba(0,0,0,0.45))' }}>
+                          <path d="M3 7l4.5 3.5L12 4l4.5 6.5L21 7l-1.8 10.5H4.8L3 7z" />
+                          <rect x="4.8" y="18.2" width="14.4" height="2.4" rx="0.8" />
+                          <circle cx="3" cy="6.2" r="1.4" />
+                          <circle cx="21" cy="6.2" r="1.4" />
+                          <circle cx="12" cy="3.2" r="1.4" />
+                        </svg>
+                      ) : (
+                        <span style={{ width: 24, height: 24, borderRadius: '50%', border: `1.5px solid ${medalColor}`, display: 'flex', alignItems: 'center', justifyContent: 'center', fontSize: 12, fontWeight: 800, color: medalColor }}>
+                          {rank}
+                        </span>
+                      )}
+                    </div>
+
+                    <div style={{ flexShrink: 0 }}>
+                      {p.photo_url ? (
+                        <img src={p.photo_url} crossOrigin="anonymous" alt={p.name} style={{ width: 44, height: 44, borderRadius: '10px', objectFit: 'cover', border: isFirst ? '1.5px solid #FFC107' : '1.5px solid var(--color-graphite)' }} />
+                      ) : (
+                        <div style={{ width: 44, height: 44, borderRadius: '10px', background: '#252d27', display: 'flex', alignItems: 'center', justifyContent: 'center', border: '1.5px solid var(--color-graphite)' }}>
+                          <i className="bi bi-person-fill" style={{ color: 'var(--color-ash)', fontSize: 18 }} />
+                        </div>
+                      )}
+                    </div>
+
+                    <div style={{ display: 'flex', flexDirection: 'column', flex: 1, minWidth: 0, textAlign: 'left' }}>
+                      <span style={{ fontSize: 14, fontWeight: 'bold', color: 'var(--color-chalk)', whiteSpace: 'nowrap', overflow: 'hidden', textOverflow: 'ellipsis' }}>{p.name}</span>
+                      <span style={{ fontSize: 11, color: 'var(--color-ash)', fontFamily: 'monospace', marginTop: 2 }}>{t('Member Code:')} <span style={{ color: 'var(--color-signal-mint)', fontWeight: 600 }}>{p.bjp_code}</span></span>
+                    </div>
+
+                    <div style={{ display: 'flex', alignItems: 'center', gap: 5, flexShrink: 0, background: 'rgba(46,204,113,0.1)', padding: '5px 11px', borderRadius: 20 }}>
+                      <i className="bi bi-people-fill" style={{ fontSize: 12, color: 'var(--color-signal-mint)' }} />
+                      <span style={{ fontSize: 14, fontWeight: 'bold', color: 'var(--color-signal-mint)' }}>{p.referrals || p.referred_count || 0}</span>
+                    </div>
+                  </div>
+                );
+              })
+            )}
+
+            {selectedMember && (
+              <div 
+                className="appointment-modal-overlay"
+                onClick={() => setSelectedMember(null)}
+              >
+                <div 
+                  className="appointment-modal-content"
+                  onClick={(e) => e.stopPropagation()}
+                  style={{ 
+                    width: '580px', 
+                    maxWidth: '95%',
+                    padding: '24px 20px', 
+                    display: 'flex', 
+                    flexDirection: 'row', 
+                    alignItems: 'center', 
+                    gap: 20,
+                    background: 'var(--color-carbon)',
+                    border: '1px solid var(--color-graphite)',
+                    borderRadius: 24,
+                    boxShadow: '0 20px 40px rgba(0, 0, 0, 0.5)',
+                    position: 'relative',
+                    flexWrap: 'wrap'
+                  }}
+                >
+                  <button className="modal-close-btn" style={{ color: '#ff3b30' }} onClick={() => setSelectedMember(null)}>×</button>
+                  
+                  {/* Left Column: Avatar & Rank */}
+                  <div style={{
+                    display: 'flex',
+                    flexDirection: 'column',
+                    alignItems: 'center',
+                    gap: 12,
+                    width: '140px',
+                    margin: '0 auto',
+                    textAlign: 'center',
+                    flexShrink: 0
+                  }}>
+                    {/* Profile Photo */}
+                    <div style={{ position: 'relative' }}>
+                      {selectedMember.photo_url ? (
+                        <img 
+                          src={selectedMember.photo_url} 
+                          alt={selectedMember.name} 
+                          style={{ 
+                            width: 80, 
+                            height: 80, 
+                            borderRadius: '50%', 
+                            objectFit: 'cover', 
+                            border: selectedMember.rank === 1 ? '2.5px solid #1E3A8A' : '2px solid var(--color-graphite)',
+                            boxShadow: selectedMember.rank === 1 ? '0 0 16px rgba(255, 153, 51, 0.35)' : 'none'
+                          }} 
+                        />
+                      ) : (
+                        <div style={{ 
+                          width: 80, 
+                          height: 80, 
+                          borderRadius: '50%', 
+                          background: '#252d27', 
+                          display: 'flex', 
+                          alignItems: 'center', 
+                          justifyContent: 'center', 
+                          border: '2px solid var(--color-graphite)' 
+                        }}>
+                          <i className="bi bi-person-fill" style={{ color: 'var(--color-ash)', fontSize: 36 }} />
+                        </div>
+                      )}
+                    </div>
+
+                    {/* Rank Badge */}
+                    <div style={{
+                      background: selectedMember.rank === 1 ? 'linear-gradient(135deg, #1E3A8A 0%, #d47a1c 100%)' : 'rgba(255,255,255,0.06)',
+                      border: selectedMember.rank === 1 ? 'none' : '1px solid var(--color-graphite)',
+                      color: selectedMember.rank === 1 ? '#000' : 'var(--color-chalk)',
+                      padding: '4px 10px',
+                      borderRadius: '16px',
+                      fontSize: '10px',
+                      fontWeight: 700,
+                      letterSpacing: '0.05em',
+                      textTransform: 'uppercase',
+                      whiteSpace: 'nowrap'
+                    }}>
+                      {selectedMember.rank === 1 ? t('👑 Champion') : t('Rank #{rank}', { rank: selectedMember.rank })}
+                    </div>
+
+                    <div>
+                      <h3 style={{ fontSize: 16, fontWeight: 700, color: 'var(--color-chalk)', marginBottom: 2, wordBreak: 'break-all' }}>{selectedMember.name}</h3>
+                      <p style={{ fontSize: 11, color: 'var(--color-signal-mint)', fontWeight: 600, margin: 0 }}>{t('Volunteer Agent')}</p>
+                    </div>
+                  </div>
+
+                  {/* Right Column: Details Grid */}
+                  <div style={{ 
+                    flex: 1, 
+                    minWidth: '280px', 
+                    display: 'grid', 
+                    gridTemplateColumns: 'repeat(2, 1fr)', 
+                    gap: 10 
+                  }}>
+                    <div style={{ 
+                      background: 'rgba(255,255,255,0.02)', 
+                      border: '1px solid rgba(255,255,255,0.04)',
+                      borderRadius: 10,
+                      padding: '8px 12px',
+                      display: 'flex',
+                      flexDirection: 'column',
+                      gap: 2
+                    }}>
+                      <div style={{ display: 'flex', alignItems: 'center', gap: 4, fontSize: 10, color: 'var(--color-ash)' }}>
+                        <i className="bi bi-hash" style={{ color: '#1E3A8A' }} />
+                        <span>{t('Member Code')}</span>
+                      </div>
+                      <span style={{ fontSize: 12, fontWeight: 600, color: 'var(--color-chalk)', fontFamily: 'monospace' }}>{selectedMember.bjp_code}</span>
+                    </div>
+
+                    <div style={{ 
+                      background: 'rgba(255,255,255,0.02)', 
+                      border: '1px solid rgba(255,255,255,0.04)',
+                      borderRadius: 10,
+                      padding: '8px 12px',
+                      display: 'flex',
+                      flexDirection: 'column',
+                      gap: 2
+                    }}>
+                      <div style={{ display: 'flex', alignItems: 'center', gap: 4, fontSize: 10, color: 'var(--color-ash)' }}>
+                        <i className="bi bi-card-text" style={{ color: '#1E3A8A' }} />
+                        <span>{t('EPIC Number')}</span>
+                      </div>
+                      <span style={{ fontSize: 12, fontWeight: 600, color: 'var(--color-chalk)', fontFamily: 'monospace' }}>{selectedMember.epic_no}</span>
+                    </div>
+
+                    <div style={{ 
+                      background: 'rgba(255,255,255,0.02)', 
+                      border: '1px solid rgba(255,255,255,0.04)',
+                      borderRadius: 10,
+                      padding: '8px 12px',
+                      display: 'flex',
+                      flexDirection: 'column',
+                      gap: 2
+                    }}>
+                      <div style={{ display: 'flex', alignItems: 'center', gap: 4, fontSize: 10, color: 'var(--color-ash)' }}>
+                        <i className="bi bi-geo-alt" style={{ color: '#1E3A8A' }} />
+                        <span>{t('Assembly')}</span>
+                      </div>
+                      <span style={{ fontSize: 12, fontWeight: 600, color: 'var(--color-chalk)', whiteSpace: 'nowrap', overflow: 'hidden', textOverflow: 'ellipsis' }} title={selectedMember.assembly_name}>{selectedMember.assembly_name}</span>
+                    </div>
+
+                    <div style={{ 
+                      background: 'rgba(255,255,255,0.02)', 
+                      border: '1px solid rgba(255,255,255,0.04)',
+                      borderRadius: 10,
+                      padding: '8px 12px',
+                      display: 'flex',
+                      flexDirection: 'column',
+                      gap: 2
+                    }}>
+                      <div style={{ display: 'flex', alignItems: 'center', gap: 4, fontSize: 10, color: 'var(--color-ash)' }}>
+                        <i className="bi bi-map" style={{ color: '#1E3A8A' }} />
+                        <span>{t('District')}</span>
+                      </div>
+                      <span style={{ fontSize: 12, fontWeight: 600, color: 'var(--color-chalk)', whiteSpace: 'nowrap', overflow: 'hidden', textOverflow: 'ellipsis' }} title={selectedMember.district}>{selectedMember.district}</span>
+                    </div>
+
+                    <div style={{ 
+                      background: 'rgba(255,255,255,0.02)', 
+                      border: '1px solid rgba(255,255,255,0.04)',
+                      borderRadius: 10,
+                      padding: '8px 12px',
+                      display: 'flex',
+                      flexDirection: 'column',
+                      gap: 2
+                    }}>
+                      <div style={{ display: 'flex', alignItems: 'center', gap: 4, fontSize: 10, color: 'var(--color-ash)' }}>
+                        <i className="bi bi-pin-map" style={{ color: '#1E3A8A' }} />
+                        <span>{t('Part Number')}</span>
+                      </div>
+                      <span style={{ fontSize: 12, fontWeight: 600, color: 'var(--color-chalk)', fontFamily: 'monospace' }}>{selectedMember.part_no}</span>
+                    </div>
+
+                    <div style={{ 
+                      background: 'rgba(46,204,113,0.04)', 
+                      border: '1px solid rgba(46,204,113,0.1)',
+                      borderRadius: 10,
+                      padding: '8px 12px',
+                      display: 'flex',
+                      justifyContent: 'space-between',
+                      alignItems: 'center'
+                    }}>
+                      <div style={{ display: 'flex', alignItems: 'center', gap: 6 }}>
+                        <i className="bi bi-people-fill" style={{ color: 'var(--color-signal-mint)', fontSize: 14 }} />
+                        <span style={{ fontSize: 11, fontWeight: 600, color: 'var(--color-chalk)' }}>{t('Total Refs')}</span>
+                      </div>
+                      <span style={{ fontSize: 16, fontWeight: 800, color: 'var(--color-signal-mint)' }}>{selectedMember.referrals}</span>
+                    </div>
+                  </div>
+                </div>
+              </div>
+            )}
+          </div>
+        )}
+      </div>
+      <style>{`
+        @keyframes spin {
+          to { transform: rotate(360deg); }
+        }
+      `}</style>
+    </div>
+  );
+}
+
+// ── Main ChatbotPage ────────────────────────────────────────
+export default function ChatbotPage() {
+  const navigate = useNavigate()
+  useEffect(() => {
+    console.log("BJP TN Member App v1.0.5 Loaded");
+
+    window.handlePDFGenerated = (pdfBlob, filename) => {
+      console.log('Parent received generated PDF blob:', filename);
+      const file = new File([pdfBlob], filename, { type: 'application/pdf' });
+      
+      const uploadAndDownloadPDF = () => {
+        const reader = new FileReader();
+        reader.readAsDataURL(pdfBlob);
+        reader.onloadend = () => {
+          const base64data = reader.result.split(',')[1];
+          const apiUrl = import.meta.env.VITE_API_URL || '';
+          const uploadUrl = `${apiUrl}/api/verify/pdf/upload`;
+          
+          fetch(uploadUrl, {
+            method: 'POST',
+            headers: {
+              'Content-Type': 'application/json'
+            },
+            body: JSON.stringify({
+              pdfData: base64data,
+              filename: filename
+            })
+          })
+          .then((res) => {
+            if (!res.ok) throw new Error('Upload failed');
+            return res.json();
+          })
+          .then((data) => {
+            const downloadId = data.downloadId;
+            const downloadUrl = `${apiUrl}/api/verify/pdf/download/${downloadId}?disposition=attachment`;
+            
+            // If we pre-opened a window, use it
+            if (window.iosWin && !window.iosWin.closed) {
+              window.iosWin.location.href = downloadUrl;
+              window.iosWin = null;
+            } else {
+              // Otherwise navigate parent
+              window.location.href = downloadUrl;
+            }
+          })
+          .catch((err) => {
+            console.error('Server upload failed, saving locally:', err);
+            if (window.iosWin && !window.iosWin.closed) {
+              try { window.iosWin.close(); } catch (e) {}
+              window.iosWin = null;
+            }
+            // Fallback: programmatically click a blob link
+            const blobUrl = URL.createObjectURL(pdfBlob);
+            const a = document.createElement('a');
+            a.href = blobUrl;
+            a.download = filename;
+            document.body.appendChild(a);
+            a.click();
+            document.body.removeChild(a);
+            URL.revokeObjectURL(blobUrl);
+          });
+        };
+      };
+
+      if (navigator.canShare && navigator.canShare({ files: [file] })) {
+        if (window.iosWin && !window.iosWin.closed) {
+          try { window.iosWin.close(); } catch (e) {}
+          window.iosWin = null;
+        }
+        navigator.share({
+          files: [file],
+          title: filename,
+          text: 'Your Official Letter'
+        })
+        .then(() => {
+          console.log('PDF shared successfully');
+        })
+        .catch((err) => {
+          console.warn('PDF share failed or canceled:', err);
+          // If the user cancelled the share sheet (AbortError), don't trigger download fallback.
+          // Otherwise, if it was a real failure, fall back to upload/download.
+          if (err.name !== 'AbortError') {
+            uploadAndDownloadPDF();
+          }
+        });
+      } else {
+        uploadAndDownloadPDF();
+      }
+    };
+
+    return () => {
+      delete window.handlePDFGenerated;
+    };
+  }, [])
+  const [chatState, setChatState]   = useState(S.WELCOME)
+  const [messages, setMessages]     = useState([])
+  const [inputValue, setInputValue] = useState('')
+  const [isTyping, setIsTyping]     = useState(false)
+  const [sendHint, setSendHint]     = useState('')   // small validation bubble near the send button
+  const sendHintTimer = useRef(null)
+  const [otpResendIn, setOtpResendIn] = useState(0)  // seconds left before "Resend OTP" is allowed
+  const otpTimerRef = useRef(null)
+  const { t, lang, setLang, showTamilVersion } = useLang()
+  const [activeView, setActiveView] = useState('chat')
+  const [sidebarOpen, setSidebarOpen] = useState(false)
+  const [isFlipped, setIsFlipped]   = useState(false)
+  const [cropSrc, setCropSrc]       = useState('')
+  const [cropOpen, setCropOpen]     = useState(false)
+  const [modalCard, setModalCard]   = useState(null)
+
+  const [referredCount, setReferredCount] = useState(0)
+  const [createdAt, setCreatedAt] = useState(null)
+  const [appreciationEarnedAt, setAppreciationEarnedAt] = useState(null)
+  const [hasAppointment, setHasAppointment] = useState(false)
+  const [localBodyInterest, setLocalBodyInterest] = useState(null)
+  const [meetingInterest, setMeetingInterest] = useState(null)
+  const [volunteerStatus, setVolunteerStatus] = useState(null)
+  const [boothAgentStatus, setBoothAgentStatus] = useState(null)
+  const [showModal, setShowModal] = useState(false)
+  const [bookingStep, setBookingStep] = useState(1) // 1: Congrats/Meeting request, 3: Meeting response thank you, 4: Local Body, 5: Local body thank you
+  const [isBooking, setIsBooking] = useState(false)
+  const [bookingError, setBookingError] = useState('')
+
+  const soundPlayedRef = useRef({ localBody: false, president: false, volunteer: false, boothAgent: false })
+
+  const playNotificationSound = () => {
+    try {
+      const AudioContext = window.AudioContext || window.webkitAudioContext
+      if (!AudioContext) return
+      const ctx = new AudioContext()
+      const now = ctx.currentTime
+      
+      // Tone 1: C5
+      const osc1 = ctx.createOscillator()
+      const gain1 = ctx.createGain()
+      osc1.type = 'sine'
+      osc1.frequency.setValueAtTime(523.25, now)
+      gain1.gain.setValueAtTime(0.12, now)
+      gain1.gain.exponentialRampToValueAtTime(0.001, now + 0.25)
+      osc1.connect(gain1)
+      gain1.connect(ctx.destination)
+      osc1.start(now)
+      osc1.stop(now + 0.25)
+
+      // Tone 2: E5
+      const osc2 = ctx.createOscillator()
+      const gain2 = ctx.createGain()
+      osc2.type = 'sine'
+      osc2.frequency.setValueAtTime(659.25, now + 0.08)
+      gain2.gain.setValueAtTime(0.12, now + 0.08)
+      gain2.gain.exponentialRampToValueAtTime(0.001, now + 0.35)
+      osc2.connect(gain2)
+      gain2.connect(ctx.destination)
+      osc2.start(now + 0.08)
+      osc2.stop(now + 0.35)
+    } catch (err) {
+      console.warn('Audio Context sound play failed:', err)
+    }
+  }
+
+  const fetchMemberStatus = async (code) => {
+    if (!code) return
+    try {
+      const res = await chat.getMemberStatus(code)
+      if (res.success) {
+        setReferredCount(res.referred_count || 0)
+        setCreatedAt(res.created_at || null)
+        setAppreciationEarnedAt(res.appreciation_earned_at || null)
+        
+        // Auto-unlock and download appreciation letter when reaching 5 referrals
+        if (!HIDE_APPRECIATION_LETTER && (res.referred_count || 0) >= 5 && !localStorage.getItem(`appreciation_letter_sent_${code}`)) {
+          localStorage.setItem(`appreciation_letter_sent_${code}`, 'true');
+          const todayDate = res.appreciation_earned_at 
+            ? new Date(res.appreciation_earned_at).toLocaleDateString('en-US', { year: 'numeric', month: 'long', day: 'numeric' })
+            : new Date().toLocaleDateString('en-US', { year: 'numeric', month: 'long', day: 'numeric' });
+          const mName = cardRef.current?.voter_name || cardRef.current?.name || profileRef.current?.voter_name || profileRef.current?.name || 'Member';
+          
+          setTimeout(() => {
+            addMsg('bot', 'text', { text: '🏆 *Congratulations!* You have successfully invited 5 members to join our Organization.' });
+          }, 500);
+          setTimeout(() => {
+            addMsg('bot', 'text', { text: 'We are pleased to present you with this official Letter of Appreciation from the State President:' });
+          }, 1500);
+          setTimeout(() => {
+            addMsg('bot', 'appreciation_letter', { name: mName, date: todayDate, autoDownload: false });
+          }, 2500);
+        }
+
+        setHasAppointment(res.has_appointment || false)
+        setLocalBodyInterest(res.local_body_interest || null)
+        setVolunteerStatus(res.volunteer_status || null)
+        setBoothAgentStatus(res.booth_agent_status || null)
+        
+        let meetInt = null
+        if (res.appointment) {
+          meetInt = res.appointment.interest || null
+        }
+        setMeetingInterest(meetInt)
+
+        // Check if any sound alert should trigger
+        const isLocalBodyPending = res.local_body_interest === null
+        const isPresidentPending = (res.referred_count || 0) >= 5 && (meetInt === null)
+        const isVolunteerStatusAlert = (res.volunteer_status === 'confirmed' || res.volunteer_status === 'rejected') &&
+          localStorage.getItem(`ack_vol_status_${code}`) !== res.volunteer_status
+        const isBoothAgentStatusAlert = (res.booth_agent_status === 'confirmed' || res.booth_agent_status === 'rejected') &&
+          localStorage.getItem(`ack_ba_status_${code}`) !== res.booth_agent_status
+
+        if (isLocalBodyPending && !soundPlayedRef.current.localBody) {
+          soundPlayedRef.current.localBody = true
+          playNotificationSound()
+        }
+        if (isPresidentPending && !soundPlayedRef.current.president) {
+          soundPlayedRef.current.president = true
+          playNotificationSound()
+        }
+        if (isVolunteerStatusAlert && !soundPlayedRef.current.volunteer) {
+          soundPlayedRef.current.volunteer = true
+          playNotificationSound()
+        }
+        if (isBoothAgentStatusAlert && !soundPlayedRef.current.boothAgent) {
+          soundPlayedRef.current.boothAgent = true
+          playNotificationSound()
+        }
+      }
+    } catch (err) {
+      console.warn('Failed to fetch member status:', err)
+      if (err?.status === 401) {
+        doAutoLogout()
+      }
+    }
+  }
+
+  const handleBellClick = () => {
+    setBookingError('')
+    if (referredCount >= 5) {
+      if (meetingInterest === null) {
+        setBookingStep(1)
+      } else {
+        setBookingStep(3)
+      }
+      setShowModal(true)
+    }
+  }
+
+  const handleSidebarOpen = () => {
+    const sCode = cardRef.current?.bjp_code || cardRef.current?.ptc_code || profileRef.current?.bjp_code || profileRef.current?.ptc_code
+    const volNotif = (volunteerStatus === 'confirmed' || volunteerStatus === 'rejected') &&
+      localStorage.getItem(`ack_vol_status_${sCode}`) !== volunteerStatus
+    const baNotif = (boothAgentStatus === 'confirmed' || boothAgentStatus === 'rejected') &&
+      localStorage.getItem(`ack_ba_status_${sCode}`) !== boothAgentStatus
+    if ((volNotif || baNotif) && !soundPlayedRef.current.sidebarOpen) {
+      soundPlayedRef.current.sidebarOpen = true
+      playNotificationSound()
+    }
+    setSidebarOpen(true)
+  }
+
+  const handleAcknowledgeStatus = (type, val) => {
+    const code = cardRef.current?.bjp_code || cardRef.current?.ptc_code || profileRef.current?.bjp_code || profileRef.current?.ptc_code
+    if (code) {
+      if (type === 'volunteer') {
+        localStorage.setItem(`ack_vol_status_${code}`, val)
+      } else if (type === 'booth_agent') {
+        localStorage.setItem(`ack_ba_status_${code}`, val)
+      }
+    }
+    setShowModal(false)
+  }
+
+  const handleLocalBodyInterestSubmit = async (interestValue) => {
+    const bjpCode = cardRef.current?.bjp_code || cardRef.current?.ptc_code || profileRef.current?.bjp_code || profileRef.current?.ptc_code
+    if (!bjpCode) return
+    setBookingError('')
+    setIsBooking(true)
+    try {
+      const res = await chat.saveLocalBodyInterest(bjpCode, interestValue)
+      setIsBooking(false)
+      if (res.success) {
+        setLocalBodyInterest(interestValue)
+        setBookingStep(5)
+      } else {
+        setBookingError(res.message || 'Failed to record response.')
+      }
+    } catch (err) {
+      setIsBooking(false)
+      setBookingError(err.message || 'Network error.')
+    }
+  }
+
+  const handleMeetingInterestSubmit = async (interestValue) => {
+    const bjpCode = cardRef.current?.bjp_code || cardRef.current?.ptc_code || profileRef.current?.bjp_code || profileRef.current?.ptc_code
+    if (!bjpCode) return
+    setBookingError('')
+    setIsBooking(true)
+    try {
+      const res = await chat.saveMeetingInterest(bjpCode, interestValue)
+      setIsBooking(false)
+      if (res.success) {
+        setMeetingInterest(interestValue)
+        setHasAppointment(interestValue === 'interested')
+        setBookingStep(3)
+      } else {
+        setBookingError(res.message || 'Failed to record response.')
+      }
+    } catch (err) {
+      setIsBooking(false)
+      setBookingError(err.message || 'Network error.')
+    }
+  }
+
+  useEffect(() => {
+    const handler = (e) => setModalCard(e.detail)
+    window.addEventListener('show-card-modal', handler)
+    return () => window.removeEventListener('show-card-modal', handler)
+  }, [])
+
+  // Persistent refs (avoid stale closures)
+  const initializedRef = useRef(false)
+  const mobileRef   = useRef('')
+  const epicRef     = useRef('')
+  const cardRef     = useRef(null)
+  const profileRef  = useRef(null)
+  const voterRef    = useRef(null)
+  const stateRef    = useRef(S.WELCOME)
+  // Referral attribution — populated from URL params on mount
+  const referralRef = useRef(getReferralParams())
+
+  const messagesEndRef  = useRef(null)
+  const fileInputRef    = useRef(null)
+  const cameraInputRef  = useRef(null)
+
+  // Keep stateRef synced
+  useEffect(() => { stateRef.current = chatState }, [chatState])
+
+  // Auto scroll
+  useEffect(() => {
+    messagesEndRef.current?.scrollIntoView({ behavior: 'smooth' })
+  }, [messages, isTyping])
+
+  // Clear the OTP resend timer on unmount
+  useEffect(() => () => { if (otpTimerRef.current) clearInterval(otpTimerRef.current) }, [])
+
+  // ── Rolling session: auto-logout after 1 hour of inactivity ────
+  // Timer resets on every user action (sliding). If the member returns before
+  // 1h, the clock restarts; 1h of no activity logs them out automatically.
+  const AUTO_LOGOUT_MS   = 60 * 60 * 1000
+  const inactivityRef    = useRef(null)
+  const lastActivityRef  = useRef(0)
+
+  const doAutoLogout = useCallback(async () => {
+    if (inactivityRef.current) { clearTimeout(inactivityRef.current); inactivityRef.current = null }
+    // Clear client-side session state
+    clearCache()
+    cardRef.current    = null
+    profileRef.current = null
+    mobileRef.current  = ''
+    epicRef.current    = ''
+    try { localStorage.removeItem('bjp_referral') } catch { /* ignore */ }
+    // Best-effort destroy the server session
+    try { await chat.logout() } catch { /* ignore */ }
+    // Reset UI to a logged-out state with a notice (no reload → keep the message)
+    setSidebarOpen(false)
+    setActiveView('chat')
+    setModalCard(null)
+    setShowModal(false)
+    setMessages([])
+    setChatState(S.WELCOME)
+    addMsg('bot', 'text', { text: t('🔒 You have been logged out after 1 hour of inactivity. Tap Start to continue.') })
+    addMsg('bot', 'welcome_banner', {})
+  // addMsg is a stable useCallback([]) declared later — referencing it in the
+  // dep array here would hit the temporal dead zone at render (ReferenceError).
+  // eslint-disable-next-line react-hooks/exhaustive-deps
+  }, [])
+
+  const armInactivityTimer = useCallback(() => {
+    if (inactivityRef.current) clearTimeout(inactivityRef.current)
+    inactivityRef.current = setTimeout(() => { doAutoLogout() }, AUTO_LOGOUT_MS)
+  }, [doAutoLogout])
+
+  // Track activity + arm the inactivity timer only while logged in (card shown).
+  useEffect(() => {
+    if (chatState !== S.DONE) return
+
+    const onActivity = () => {
+      const now = Date.now()
+      if (now - lastActivityRef.current < 15000) return  // throttle to once / 15s
+      lastActivityRef.current = now
+      touchCache()
+      armInactivityTimer()
+    }
+    const onVisible = () => {
+      if (document.visibilityState !== 'visible') return
+      if (!getCache()) { doAutoLogout(); return }  // expired while tab was hidden
+      touchCache()
+      armInactivityTimer()
+    }
+    const events = ['mousedown', 'keydown', 'touchstart', 'scroll']
+    events.forEach((e) => window.addEventListener(e, onActivity, { passive: true }))
+    document.addEventListener('visibilitychange', onVisible)
+
+    // Being on the logged-in screen counts as activity — start the clock.
+    lastActivityRef.current = Date.now()
+    touchCache()
+    armInactivityTimer()
+
+    return () => {
+      events.forEach((e) => window.removeEventListener(e, onActivity))
+      document.removeEventListener('visibilitychange', onVisible)
+      if (inactivityRef.current) { clearTimeout(inactivityRef.current); inactivityRef.current = null }
+    }
+  }, [chatState, armInactivityTimer, doAutoLogout])
+
+  // ── Message helpers ───────────────────────────────────────
+  const addMsg = useCallback((from, type, payload = {}) => {
+    setMessages((prev) => [...prev, {
+      id: `${Date.now()}-${Math.random().toString(36).slice(2, 8)}`,
+      from, type, ...payload,
+      ts: new Date(),
+    }])
+  }, [])
+
+  const botSay = useCallback(async (text, delay = 500) => {
+    setIsTyping(true)
+    await sleep(delay)
+    setIsTyping(false)
+    addMsg('bot', 'text', { text })
+  }, [addMsg])
+
+  // ── Initialise ────────────────────────────────────────────
+  useEffect(() => {
+    if (initializedRef.current) return
+    initializedRef.current = true
+
+    if ('Notification' in window && Notification.permission === 'default') {
+      Notification.requestPermission();
+    }
+
+    const cache = getCache()
+    if (cache?.card) {
+      cardRef.current    = cache.card
+      profileRef.current = cache.profile || {}
+      epicRef.current    = cache.card.epic_no || ''
+      // Note: mobile is NOT stored in localStorage for PII protection
+      
+      // Only warn "already a member / rescan" when a referral is present in the
+      // CURRENT URL (i.e. they actually scanned someone's QR this visit).
+      // Do NOT use getReferralParams() here — it falls back to a 24h localStorage
+      // value, which caused a false "Already you are a member" on a plain revisit.
+      const urlRef = hasReferralInUrl()
+      if (urlRef) {
+        addMsg('bot', 'text', { text: t('⚠️ *Already you are a member!* Try to logout and rescan the QR.') })
+      } else {
+        addMsg('bot', 'text', { text: t('👋 Welcome back to the *Member Platform!*') })
+      }
+
+      const bjpCode = cache.card.bjp_code || cache.card.ptc_code
+      if (bjpCode) {
+        fetchMemberStatus(bjpCode)
+      }
+      setTimeout(() => {
+        addMsg('bot', 'generated_card', { card: cache.card })
+        setChatState(S.DONE)
+      }, 300)
+    } else {
+      addMsg('bot', 'welcome_banner', {})
+      setChatState(S.WELCOME)
+    }
+  // eslint-disable-next-line react-hooks/exhaustive-deps
+  }, [])
+
+  // ── Flow handlers ─────────────────────────────────────────
+  const handleStart = async () => {
+    addMsg('user', 'text', { text: t('Start') })
+    setChatState(S.AWAIT_MOBILE)
+    await botSay(t('📱 Please enter your 10-digit mobile number to get started.'), 400)
+  }
+
+  const handleMobileSubmit = async () => {
+    const mobile = inputValue.trim()
+    if (!/^\d{10}$/.test(mobile)) {
+      await botSay(t('❌ Please enter a valid 10-digit mobile number.'), 300)
+      return
+    }
+    mobileRef.current = mobile
+    addMsg('user', 'text', { text: maskMobile(mobile) })
+    setInputValue('')
+
+    // Verify the mobile via OTP for EVERYONE (new members and returning members).
+    // After OTP: existing member → show their card; new member → proceed to EPIC.
+    setIsTyping(true)
+    try {
+      const sent = await chat.sendOtp(mobile)
+      setIsTyping(false)
+      if (!sent?.success) {
+        await botSay(t('❌ Could not send OTP right now. Please try again in a moment.'), 300)
+        return
+      }
+    } catch (e) {
+      setIsTyping(false)
+      await botSay(`❌ ${e?.message || t('Could not send OTP. Please try again.')}`, 300)
+      return
+    }
+    await botSay(t("🔐 We've sent a 6-digit OTP to {mobile}. Please enter it to continue.", { mobile: maskMobile(mobile) }), 300)
+    setChatState(S.AWAIT_OTP)
+    startOtpCountdown(60)
+  }
+
+  const handleOtpSubmit = async () => {
+    const otp = inputValue.trim()
+    if (!/^\d{6}$/.test(otp)) {
+      await botSay(t('❌ Please enter the 6-digit OTP sent to your number.'), 300)
+      return
+    }
+    const mobile = mobileRef.current
+    addMsg('user', 'text', { text: '••••••' })   // never echo the OTP
+    setInputValue('')
+    setIsTyping(true)
+    try {
+      const res = await chat.verifyOtp(mobile, otp)
+      setIsTyping(false)
+      if (res.success && res.has_card) {
+        const card = {
+          epic_no:       res.epic_no || '',
+          voter_name:    res.voter_name || '',
+          card_url:      res.card_url || '',
+          back_url:      res.back_url || '',
+          combined_url:  res.combined_url || res.card_url || '',
+          photo_url:     res.photo_url || '',
+          bjp_code:      res.bjp_code || '',
+          referral_link: res.referral_link || '',
+        }
+        cardRef.current = card
+        saveCache(card, {})
+        if (res.referred_count !== undefined) {
+          setReferredCount(res.referred_count)
+        }
+        if (card.bjp_code) {
+          fetchMemberStatus(card.bjp_code)
+        }
+        await botSay(t('✅ Verified! Here is your Digital Member ID Card:'), 300)
+        addMsg('bot', 'generated_card', { card })
+        setChatState(S.DONE)
+        return
+      }
+      // Verified and no existing registration → start a new registration.
+      await botSay(t('✅ Mobile verified! You are not registered yet — enter your EPIC Number (Voter ID) to continue.'), 300)
+      await botSay(t('📋 Format: 3 letters + 7 digits  e.g. ABC1234567'), 200)
+      setChatState(S.AWAIT_EPIC)
+    } catch (err) {
+      setIsTyping(false)
+      // 400 = invalid/expired OTP, 429 = too many attempts
+      await botSay(`❌ ${t(err?.message || 'Invalid OTP. Please try again.')}`, 300)
+      // stay on AWAIT_OTP so the user can retry
+    }
+  }
+
+  // Start / restart the resend cooldown (matches the backend's 60s cooldown).
+  const startOtpCountdown = (sec = 60) => {
+    if (otpTimerRef.current) clearInterval(otpTimerRef.current)
+    setOtpResendIn(sec)
+    otpTimerRef.current = setInterval(() => {
+      setOtpResendIn((s) => {
+        if (s <= 1) { clearInterval(otpTimerRef.current); otpTimerRef.current = null; return 0 }
+        return s - 1
+      })
+    }, 1000)
+  }
+
+  const handleResendOtp = async () => {
+    if (otpResendIn > 0 || isTyping) return
+    const mobile = mobileRef.current
+    if (!/^\d{10}$/.test(mobile || '')) return
+    setIsTyping(true)
+    try {
+      const sent = await chat.sendOtp(mobile)
+      setIsTyping(false)
+      if (sent?.success) {
+        await botSay(t('📨 A new OTP has been sent to {mobile}.', { mobile: maskMobile(mobile) }), 250)
+        startOtpCountdown(60)
+      } else {
+        await botSay(t('❌ Could not resend OTP. Please try again shortly.'), 250)
+      }
+    } catch (e) {
+      setIsTyping(false)
+      // Backend enforces a 60s cooldown; if we're early it returns the wait time.
+      const msg = e?.message || t('Could not resend OTP. Please try again.')
+      const m = /(\d+)\s*s/.exec(msg)
+      if (m) startOtpCountdown(Math.min(60, parseInt(m[1], 10)))
+      await botSay(t('⏳ {message}', { message: msg }), 250)
+    }
+  }
+
+  const handleEpicSubmit = async () => {
+    const epic = inputValue.trim().toUpperCase()
+    if (!/^[A-Z]{3}\d{7}$/.test(epic)) {
+      await botSay(t('❌ Invalid format. Use 3 letters + 7 digits (e.g., ABC1234567).'), 300)
+      return
+    }
+    epicRef.current = epic
+    addMsg('user', 'text', { text: epic })
+    setInputValue('')
+    setIsTyping(true)
+    try {
+      const res = await chat.validateEpic(epic, mobileRef.current)
+      await sleep(200)
+      setIsTyping(false)
+
+      if (res.already_registered || res.card_url) {
+        const card = {
+          epic_no:     res.epic_no     || epic,
+          voter_name:  res.voter_name  || '',
+          card_url:    res.card_url    || '',
+          back_url:    res.back_url    || '',
+          combined_url: res.combined_url || '',
+          photo_url:   res.photo_url   || '',
+          bjp_code:    res.bjp_code    || res.ptc_code    || '',
+          referral_link: res.referral_link || '',
+        }
+        cardRef.current = card
+        saveCache(card, {})
+        if (card.bjp_code) {
+          fetchMemberStatus(card.bjp_code)
+        }
+        await botSay(t('✅ You are already a registered member! Here is your Digital Member ID Card:'), 300)
+        addMsg('bot', 'generated_card', { card })
+        setChatState(S.DONE)
+        return
+      }
+
+      const voter = res.voter || res.data || res
+      if (!voter || (!voter.name && !voter.Name && !voter.voter_name)) {
+        throw new Error(t('Voter data not found in response'))
+      }
+      voterRef.current = voter
+      await botSay(t('✅ Voter found! Please confirm your details:'), 200)
+      addMsg('bot', 'voter_card', { voter })
+      setChatState(S.CONFIRM)
+    } catch (err) {
+      setIsTyping(false)
+      // API returns 409 with already_registered — axios wraps it as error
+      const data = err
+      if (data?.already_registered || data?.card_url) {
+        const card = {
+          epic_no:     data.epic_no     || epic,
+          voter_name:  data.voter_name  || '',
+          card_url:    data.card_url    || '',
+          back_url:    data.back_url    || '',
+          combined_url: data.combined_url || '',
+          photo_url:   data.photo_url   || '',
+          bjp_code:    data.bjp_code    || data.ptc_code    || '',
+          referral_link: data.referral_link || '',
+        }
+        cardRef.current = card
+        saveCache(card, {})
+        await botSay(t('✅ You are already a registered member! Here is your Digital Member ID Card:'), 300)
+        addMsg('bot', 'generated_card', { card })
+        setChatState(S.DONE)
+        return
+      }
+      await botSay(`❌ ${err.message || t('EPIC not found. Please check and try again.')}`, 200)
+    }
+  }
+
+  const handleConfirm = async () => {
+    addMsg('user', 'text', { text: t('✓ Confirmed') })
+    await botSay(t('📸 Please upload your recent passport-size photo to generate your card.'), 400)
+    setChatState(S.AWAIT_PHOTO)
+  }
+
+  const handleRetry = async () => {
+    addMsg('user', 'text', { text: t('↩ Try Again') })
+    epicRef.current = ''
+    voterRef.current = null
+    await botSay(t('📋 Please enter your EPIC Number again.'), 300)
+    setChatState(S.AWAIT_EPIC)
+  }
+
+  const handleFileSelect = (file) => {
+    if (!file) return
+    if (!file.type.startsWith('image/')) {
+      botSay(t('❌ Please select an image file (JPG, PNG, etc.).'), 200)
+      return
+    }
+    const reader = new FileReader()
+    reader.onload = (e) => { setCropSrc(e.target.result); setCropOpen(true) }
+    reader.readAsDataURL(file)
+  }
+
+  const handleCropComplete = async (blob) => {
+    setCropOpen(false)
+    setCropSrc('')
+    addMsg('user', 'text', { text: t('📸 Photo uploaded') })
+    setChatState(S.GENERATING)
+    await botSay(t('⏳ Generating your card… please wait a moment.'), 400)
+
+    try {
+      const { ref, rid } = referralRef.current
+
+      // Preferred path: upload the photo DIRECTLY to Backblaze B2 via a
+      // presigned URL, so photo bytes + image compression never touch our
+      // server (scales to large concurrent bursts). Only the upload step
+      // falls back to multipart — business errors are handled normally.
+      let photoKey = null
+      try {
+        const presign = await chat.getPhotoUploadUrl(epicRef.current, mobileRef.current)
+        if (presign?.uploadUrl && presign?.key) {
+          await chat.uploadPhotoToB2(presign.uploadUrl, blob)
+          photoKey = presign.key
+        }
+      } catch (_) {
+        photoKey = null // upload failed → use multipart fallback below
+      }
+
+      let res
+      if (photoKey) {
+        res = await chat.generateCard({
+          epic_no:   epicRef.current,
+          mobile:    mobileRef.current,
+          photo_key: photoKey,
+          ...(ref ? { ref } : {}),
+          ...(rid ? { rid } : {}),
+        })
+      } else {
+        const formData = new FormData()
+        formData.append('epic_no', epicRef.current)
+        formData.append('mobile', mobileRef.current)
+        formData.append('photo', blob, 'photo.jpg')
+        if (ref) formData.append('ref', ref)
+        if (rid) formData.append('rid', rid)
+        res = await chat.generateCard(formData)
+      }
+
+      const card = {
+        card_url:      res.card_url,
+        back_url:      res.back_url,
+        combined_url:  res.combined_url,
+        epic_no:       res.epic_no || epicRef.current,
+        bjp_code:      res.bjp_code || res.ptc_code,
+        referral_link: res.referral_link || '',
+        name:          voterRef.current?.name || voterRef.current?.VOTER_NAME || res.voter_name,
+        assembly_name: voterRef.current?.assembly_name || voterRef.current?.assembly || voterRef.current?.ASSEMBLY_NAME,
+        district:      voterRef.current?.district || voterRef.current?.DISTRICT || voterRef.current?.DISTRICT_NAME,
+        part_no:       voterRef.current?.part_no || voterRef.current?.PartNo || voterRef.current?.PART_NO,
+        photo_url:     res.photo_url || voterRef.current?.photo_url,
+      }
+      cardRef.current = card
+      saveCache(card, profileRef.current || {})
+      if (card.bjp_code) {
+        fetchMemberStatus(card.bjp_code)
+      }
+
+      // Clear referral storage since card is successfully generated under this referral
+      try {
+        localStorage.removeItem('bjp_referral')
+      } catch {}
+
+      await botSay(t('🎉 Your Digital Member ID Card is ready!'), 200)
+      addMsg('bot', 'generated_card', { card, isNew: true })
+
+      // Send Welcome Letter PDF attachment
+      if (!HIDE_WELCOME_LETTER) {
+        await sleep(1000)
+        await botSay(
+          t('✉️ *Welcome to the Organization!*\nWe have prepared your official welcome letter. Click below to view, print, or save it as a PDF:'),
+          300
+        )
+        await sleep(400)
+        const regDate = card.created_at || card.generated_at
+          ? new Date(card.created_at || card.generated_at).toLocaleDateString('en-US', { year: 'numeric', month: 'long', day: 'numeric' })
+          : new Date().toLocaleDateString('en-US', { year: 'numeric', month: 'long', day: 'numeric' });
+        addMsg('bot', 'welcome_letter', { name: card.voter_name || card.name, date: regDate, ref: card.bjp_code || card.ptc_code, autoDownload: false })
+      }
+
+      if (card.referral_link) {
+        await sleep(1200)
+        addMsg('bot', 'referral_link', { link: card.referral_link })
+      }
+
+      setChatState(S.DONE)
+    } catch (err) {
+      setChatState(S.AWAIT_PHOTO)
+      await botSay(`❌ ${err.message || t('Error generating card. Please try uploading your photo again.')}`, 200)
+    }
+  }
+
+  const handleBoothNoSubmit = async () => {
+    const boothNo = inputValue.trim()
+    if (!boothNo) return
+    const bjpCode = cardRef.current?.bjp_code || cardRef.current?.ptc_code || profileRef.current?.bjp_code || profileRef.current?.ptc_code
+    addMsg('user', 'text', { text: t('Booth No: {booth}', { booth: boothNo }) })
+    setInputValue('')
+    setIsTyping(true)
+    try {
+      const res = await chat.requestBoothAgent(bjpCode, epicRef.current, boothNo)
+      setIsTyping(false)
+      await botSay(res.message || t('✅ Booth Agent request submitted! Admin will review it shortly.'), 200)
+    } catch (err) {
+      setIsTyping(false)
+      await botSay(`ℹ️ ${err.message || t('Unable to submit request. Please try again.')}`, 200)
+    }
+    setChatState(S.DONE)
+  }
+
+  // ── Sidebar actions ───────────────────────────────────────
+  const handleSidebarAction = async (action) => {
+    setSidebarOpen(false)
+    if (action === 'brochure') {
+      setActiveView('brochure')
+      return
+    }
+    if (action === 'profile') {
+      setActiveView('profile')
+      return
+    }
+    if (action === 'my_card') {
+      setActiveView('my_card')
+      return
+    }
+    if (action === 'welcome_letter') {
+      setActiveView('welcome_letter')
+      return
+    }
+    if (action === 'appreciation_letter') {
+      setActiveView('appreciation_letter')
+      return
+    }
+    if (action === 'best_performers') {
+      setActiveView('best_performers')
+      return
+    }
+    if (action === 'volunteer') {
+      setActiveView('volunteer')
+      return
+    }
+    if (action === 'booth_agent') {
+      setActiveView('booth_agent')
+      return
+    }
+    if (action === 'booth_info') {
+      setActiveView('booth_info')
+      return
+    }
+    if (action === 'local_body') {
+      setActiveView('local_body')
+      return
+    }
+    if (action === 'my_members') {
+      setActiveView('my_members')
+      return
+    }
+    setActiveView('chat')
+    const bjpCode = cardRef.current?.bjp_code || cardRef.current?.ptc_code || profileRef.current?.bjp_code || profileRef.current?.ptc_code
+
+    switch (action) {
+
+
+      case 'referral': {
+        if (!bjpCode) { await botSay('ℹ️ Referral link unavailable.', 200); return }
+        // Use cached link from card if available — avoids a session-auth round-trip
+        const cachedLink = cardRef.current?.referral_link
+        if (cachedLink) {
+          setActiveView('referral')
+          break
+        }
+        setIsTyping(true)
+        try {
+          const res = await chat.getReferralLink(bjpCode)
+          setIsTyping(false)
+          const link = res.referral_link || res.link || res.url || ''
+          // Cache it on the card ref for future sidebar clicks
+          if (link && cardRef.current) cardRef.current.referral_link = link
+          setActiveView('referral')
+        } catch {
+          setIsTyping(false)
+          await botSay('❌ Unable to load referral link.', 200)
+        }
+        break
+      }
+      default: break
+    }
+  }
+
+  const handleLogout = async () => {
+    // 1. Clear all in-memory React state
+    clearCache()                           // localStorage CACHE_KEY
+    sessionStorage.clear()                 // any session-level cache
+    mobileRef.current  = ''
+    epicRef.current    = ''
+    cardRef.current    = null
+    profileRef.current = null
+    voterRef.current   = null
+    soundPlayedRef.current = { localBody: false, president: false }
+    setSidebarOpen(false)
+    setIsFlipped(false)
+    setInputValue('')
+    setMessages([])
+
+    // 2. Drop any stored referral attribution so a refresh after logout does
+    //    NOT keep showing the referral link. Only a fresh QR scan (which puts
+    //    ?ref=&rid= back in the URL) should re-attach a referral.
+    try { localStorage.removeItem('bjp_referral') } catch (_) {}
+
+    // 3. Destroy the backend session cookie (fire-and-forget)
+    try { await chat.logout() } catch (_) {}
+
+    // 4. Reload to the CLEAN base URL (strip ?ref=&rid= query string) after a
+    //    tiny delay — ensures a totally clean slate so no cached card / photo
+    //    data or stale referral code bleeds into the next visit.
+    setTimeout(() => {
+      window.location.replace(window.location.origin + window.location.pathname)
+    }, 300)
+  }
+
+  // ── Input config ──────────────────────────────────────────
+  const getInputCfg = () => {
+    switch (chatState) {
+      case S.AWAIT_MOBILE:
+        return { type: 'tel', placeholder: t('Enter 10-digit mobile number'), maxLength: 10, inputMode: 'numeric' }
+      case S.AWAIT_OTP:
+        return { type: 'tel', placeholder: t('Enter 6-digit OTP'), maxLength: 6, inputMode: 'numeric' }
+      case S.AWAIT_EPIC:
+        return { type: 'text', placeholder: t('EPIC Number (e.g. ABC1234567)'), maxLength: 10 }
+      case S.AWAIT_BOOTH_NO:
+        return { type: 'text', placeholder: t('Enter your Booth Number'), maxLength: 30 }
+      default:
+        return null
+    }
+  }
+
+  const getIsSendDisabled = () => {
+    if (isTyping) return true
+    const val = inputValue.trim()
+    if (chatState === S.AWAIT_MOBILE) return val.length !== 10
+    if (chatState === S.AWAIT_OTP) return val.length !== 6
+    if (chatState === S.AWAIT_EPIC) return val.length !== 10
+    return !val
+  }
+
+  const handleInputChange = (e) => {
+    let val = e.target.value
+    if (chatState === S.AWAIT_EPIC) {
+      val = val.toUpperCase().replace(/[^A-Z0-9]/g, '')
+      const letters = val.slice(0, 3).replace(/[^A-Z]/g, '')
+      const digits  = val.slice(3).replace(/[^0-9]/g, '').slice(0, 7)
+      val = letters + digits
+    } else if (chatState === S.AWAIT_MOBILE) {
+      val = val.replace(/\D/g, '')
+    } else if (chatState === S.AWAIT_OTP) {
+      val = val.replace(/\D/g, '').slice(0, 6)
+    }
+    if (sendHint) setSendHint('')   // clear the hint as soon as the user types
+    setInputValue(val)
+  }
+
+  // Small transient bubble shown near the send button on invalid submit.
+  const flashSendHint = (msg) => {
+    setSendHint(msg)
+    if (sendHintTimer.current) clearTimeout(sendHintTimer.current)
+    sendHintTimer.current = setTimeout(() => setSendHint(''), 3000)
+  }
+
+  // Returns a validation message if the current field is invalid, else ''.
+  const getFieldHint = () => {
+    const val = inputValue.trim()
+    if (chatState === S.AWAIT_MOBILE) {
+      return /^\d{10}$/.test(val) ? '' : 'Please enter a 10-digit mobile number'
+    }
+    if (chatState === S.AWAIT_OTP) {
+      return /^\d{6}$/.test(val) ? '' : 'Please enter the 6-digit OTP'
+    }
+    if (chatState === S.AWAIT_EPIC) {
+      return /^[A-Z]{3}\d{7}$/.test(val) ? '' : 'Please enter a valid EPIC number (e.g. ABC1234567)'
+    }
+    if (chatState === S.AWAIT_BOOTH_NO) {
+      return val ? '' : 'Please enter your booth number'
+    }
+    return ''
+  }
+
+  const handleSubmit = async (e) => {
+    e?.preventDefault()
+    if (isTyping) return
+
+    // Validate first — if invalid, show a small bubble instead of proceeding.
+    const hint = getFieldHint()
+    if (hint) {
+      flashSendHint(hint)
+      return
+    }
+
+    switch (chatState) {
+      case S.AWAIT_MOBILE:   await handleMobileSubmit(); break
+      case S.AWAIT_OTP:      await handleOtpSubmit(); break
+      case S.AWAIT_EPIC:     await handleEpicSubmit(); break
+      case S.AWAIT_BOOTH_NO: await handleBoothNoSubmit(); break
+      default: break
+    }
+  }
+
+  // ── Render message content ────────────────────────────────
+  const renderMsgContent = (msg) => {
+    switch (msg.type) {
+      case 'text': {
+        // HTML-escape text before applying bold markdown to prevent XSS
+        const escapeHtml = (s) => String(s || '')
+          .replace(/&/g, '&amp;')
+          .replace(/</g, '&lt;')
+          .replace(/>/g, '&gt;')
+          .replace(/"/g, '&quot;')
+        const safeHtml = escapeHtml(msg.text || '').replace(/\*(.*?)\*/g, '<strong>$1</strong>')
+        return <span dangerouslySetInnerHTML={{ __html: safeHtml }} />
+      }
+      case 'welcome_banner':
+        return <WelcomeBannerMsg onStart={handleStart} />
+      case 'voter_card': {
+        const isLatest = messages[messages.length - 1]?.id === msg.id
+        return (
+          <VoterCardMsg
+            voter={msg.voter}
+            isLatest={isLatest}
+            chatState={chatState}
+            onConfirm={handleConfirm}
+            onRetry={handleRetry}
+            disabled={isTyping}
+          />
+        )
+      }
+      case 'generated_card':
+        return <GeneratedCardMsg card={msg.card} isNew={msg.isNew || false} />
+      case 'welcome_letter':
+        return <WelcomeLetterMsg name={msg.name} date={msg.date} refCode={msg.ref || cardRef.current?.bjp_code || cardRef.current?.ptc_code || profileRef.current?.bjp_code || profileRef.current?.ptc_code} autoDownload={msg.autoDownload} />
+      case 'appreciation_letter':
+        return <AppreciationLetterMsg name={msg.name} date={msg.date} refCode={msg.ref || cardRef.current?.bjp_code || cardRef.current?.ptc_code || profileRef.current?.bjp_code || profileRef.current?.ptc_code} autoDownload={msg.autoDownload} />
+      case 'profile_card':
+        return (
+          <div className="profile-card">
+            {msg.profile?.photo_url && (
+              <img src={msg.profile.photo_url} crossOrigin="anonymous" alt="Profile" className="profile-photo" />
+            )}
+            <div className="profile-details">
+              <h4>{msg.profile?.name || 'Member'}</h4>
+              <p>{[msg.profile?.assembly, msg.profile?.district].filter(Boolean).join(', ')}</p>
+              {(msg.profile?.epic_no || epicRef.current) && <p>EPIC: {msg.profile?.epic_no || epicRef.current}</p>}
+              {(msg.profile?.bjp_code || msg.profile?.ptc_code) && <p className="bjp">Member ID: {msg.profile.bjp_code || msg.profile.ptc_code}</p>}
+            </div>
+          </div>
+        )
+      case 'booth_info': {
+        const booth = msg.booth || {}
+        const SKIP_KEYS = new Set(['success', 'polling_station'])
+        const entries = Object.entries(booth).filter(([k, v]) => !SKIP_KEYS.has(k) && v !== null && v !== undefined && v !== '')
+        return (
+          <div className="info-card booth-card">
+            <div className="info-card-header"><i className="bi bi-building" /> {t('Booth Information')}</div>
+            <div className="vdc-body">
+              {entries.length > 0 ? entries.map(([k, v]) => (
+                <div className="vdc-row" key={k}>
+                  <span className="vdc-label">{k.replace(/_/g, ' ')}</span>
+                  <span className="vdc-value">{String(v)}</span>
+                </div>
+              )) : <p style={{ padding: '10px 12px', fontSize: 12, color: '#8696a0' }}>{t('No booth information available.')}</p>}
+            </div>
+          </div>
+        )
+      }
+      case 'referral_link':
+        return <ReferralLinkMsg link={msg.link || ''} />
+      case 'members_list': {
+        const members = msg.members || []
+        return (
+          <div className="members-card info-card">
+            <div className="info-card-header"><i className="bi bi-people-fill" /> {t('My Members')} ({members.length})</div>
+            {members.length === 0 ? (
+              <p className="members-empty">{t('No members yet. Share your referral link!')}</p>
+            ) : (
+              <ul className="members-list">
+                {members.slice(0, 15).map((m, i) => (
+                  <li key={i}>
+                    <span>{m.name || m.Name || m.voter_name || 'Member'}</span>
+                    <span style={{ opacity: 0.6, fontSize: 11 }}>{m.epic_no || m.EpicNo || ''}</span>
+                  </li>
+                ))}
+                {members.length > 15 && <li style={{ opacity: 0.5, fontStyle: 'italic' }}>+{members.length - 15} more…</li>}
+              </ul>
+            )}
+          </div>
+        )
+      }
+      case 'best_performers': {
+        const performers = msg.performers || []
+        return (
+          <div className="members-card info-card best-performers-card">
+            <div className="info-card-header">
+              <i className="bi bi-trophy-fill text-warning me-2" /> {t('Top 5 Referrers')}
+            </div>
+            {performers.length === 0 ? (
+              <p className="members-empty">{t('No referrals generated yet. Invite members to lead the board!')}</p>
+            ) : (
+              <ul className="members-list best-performers-list" style={{ listStyle: 'none', padding: 0 }}>
+                {performers.map((p, i) => (
+                  <li key={i} style={{ display: 'flex', justifyContent: 'space-between', alignItems: 'center', padding: '10px 12px', borderBottom: i < performers.length - 1 ? '1px solid var(--border-dim)' : 'none' }}>
+                    <div style={{ display: 'flex', alignItems: 'center', gap: 10 }}>
+                      <span className={`rank-badge rank-${p.rank}`} style={{
+                        display: 'flex',
+                        alignItems: 'center',
+                        justifyContent: 'center',
+                        width: 22,
+                        height: 22,
+                        borderRadius: '50%',
+                        fontSize: 11,
+                        fontWeight: 'bold',
+                        background: p.rank === 1 ? '#ffd700' : p.rank === 2 ? '#c0c0c0' : p.rank === 3 ? '#cd7f32' : 'var(--admin-surface-raise)',
+                        color: p.rank <= 3 ? '#000' : 'var(--text-secondary)'
+                      }}>{p.rank}</span>
+                      <div style={{ display: 'flex', flexDirection: 'column' }}>
+                        <span style={{ fontSize: 13, fontWeight: '500' }}>{p.name}</span>
+                        <span style={{ fontSize: 10, opacity: 0.6 }}>{t('Member Code:')} {p.bjp_code}</span>
+                      </div>
+                    </div>
+                    <span className="badge-status badge-generated" style={{ fontSize: 12, fontWeight: 'bold' }}>
+                      {p.referred_count === 1 ? t('{count} referral', { count: p.referred_count }) : t('{count} referrals', { count: p.referred_count })}
+                    </span>
+                  </li>
+                ))}
+              </ul>
+            )}
+          </div>
+        )
+      }
+      case 'select_wing': {
+        const isLatest = messages[messages.length - 1]?.id === msg.id
+        return (
+          <SelectWingMsg
+            bjpCode={msg.bjpCode}
+            epicNo={msg.epicNo}
+            isLatest={isLatest}
+          />
+        )
+      }
+      case 'booth_agent_flow': {
+        const isLatest = messages[messages.length - 1]?.id === msg.id
+        return (
+          <BoothAgentSetupMsg
+            bjpCode={msg.bjpCode}
+            epicNo={msg.epicNo}
+            isLatest={isLatest}
+          />
+        )
+      }
+      default:
+        return <span>{msg.text || ''}</span>
+    }
+  }
+
+  // ── Input area render ─────────────────────────────────────
+  const inputCfg = getInputCfg()
+  const isWide   = ['voter_card', 'generated_card', 'booth_info', 'referral_link', 'members_list', 'profile_card'].includes
+  const isDone   = chatState === S.DONE
+
+  const code = cardRef.current?.bjp_code || cardRef.current?.ptc_code || profileRef.current?.bjp_code || profileRef.current?.ptc_code
+  const hasPendingNotification = 
+    (referredCount >= 5 && meetingInterest === null)
+
+  const hasVolunteerNotif = (volunteerStatus === 'confirmed' || volunteerStatus === 'rejected') &&
+    localStorage.getItem(`ack_vol_status_${code}`) !== volunteerStatus
+  const hasBoothAgentNotif = (boothAgentStatus === 'confirmed' || boothAgentStatus === 'rejected') &&
+    localStorage.getItem(`ack_ba_status_${code}`) !== boothAgentStatus
+  const hasSidebarNotification = hasVolunteerNotif || hasBoothAgentNotif
+
+  // Cache-busting comment v1.0.5 to force new hash
+  return (
+    <div className="chatbot-app bjp-theme">
+      {/* ── Main Layout ── */}
+      <div className="main-content-layout single-layout">
+        
+        {/* Left Menu Panel (WhatsApp style) */}
+        <div className="left-menu-panel">
+          <div className="left-menu-header">
+            <div className="left-menu-profile">
+              <img src="/org_logo.svg" alt="Logo" onError={(e) => { e.target.style.display = 'none' }} />
+              <div className="left-menu-profile-info">
+                <div className="left-menu-brand">{t('TN Member Digital ID Generation')}</div>
+                <div className="left-menu-status">
+                  <span className="status-dot-green" /> {t('Online')}
+                </div>
+              </div>
+            </div>
+            <div className="left-menu-header-actions" style={{ display: 'flex', gap: 12, alignItems: 'center' }}>
+              {/* Language toggle: E (English) / த (Tamil) */}
+              {showTamilVersion && (
+                <div className="lang-toggle" role="group" aria-label="Language">
+                  <button
+                    type="button"
+                    className={`lang-toggle-btn${lang === 'en' ? ' active' : ''}`}
+                    onClick={() => setLang('en')}
+                    aria-pressed={lang === 'en'}
+                    title="English"
+                  >E</button>
+                  <button
+                    type="button"
+                    className={`lang-toggle-btn${lang === 'ta' ? ' active' : ''}`}
+                    onClick={() => setLang('ta')}
+                    aria-pressed={lang === 'ta'}
+                    title="தமிழ்"
+                  >த</button>
+                </div>
+              )}
+              {isDone && (
+                <button
+                  className={`chat-header-btn bell-alert-btn ${
+                    hasPendingNotification ? 'pulsing-vibrate' : ''
+                  } ${hasAppointment ? 'bell-booked-btn' : ''}`}
+                  onClick={handleBellClick}
+                  title={
+                    hasAppointment 
+                      ? t('Meeting Scheduled! Click to view details') 
+                      : t('Milestone Achieved! Click to Schedule Meeting with President')
+                  }
+                  style={{ 
+                    fontSize: 18, 
+                    color: hasAppointment ? '#2ecc71' : '#D1B078', 
+                    border: 'none', 
+                    background: 'none', 
+                    cursor: 'pointer' 
+                  }}
+                >
+                  <i className="bi bi-bell-fill" />
+                  {hasPendingNotification && <span className="bell-badge" />}
+                </button>
+              )}
+              {isDone && (
+                <button
+                  className="chat-header-btn"
+                  onClick={() => {
+                    if (window.confirm(t('Logout and start over?'))) handleLogout()
+                  }}
+                  title={t('Logout')}
+                  style={{ fontSize: 16 }}
+                >
+                  <i className="bi bi-box-arrow-right" />
+                </button>
+              )}
+            </div>
+          </div>
+
+
+
+          <div className="left-chat-list">
+            <div className="left-chat-item active">
+              <div className="left-chat-avatar bot-avatar">
+                <i className="bi bi-robot" />
+              </div>
+              <div className="left-chat-details">
+                <div className="left-chat-name-row">
+                  <span className="left-chat-name">{t('TN Member Digital ID Bot')}</span>
+                  <span className="left-chat-time">{fmtTime(new Date())}</span>
+                </div>
+                <div className="left-chat-msg">
+                  {!isDone ? t('Register to generate your Member Card') : t('Registration completed successfully!')}
+                </div>
+              </div>
+            </div>
+
+            {[
+              { icon: 'person-circle',       label: 'My Profile',       action: 'profile',     desc: 'View registration details' },
+              { icon: 'credit-card-2-front', label: 'My Card',          action: 'my_card',      desc: 'View and download ID card' },
+              ...(HIDE_WELCOME_LETTER ? [] : [{ icon: 'envelope-paper-fill', label: 'My Welcome Letter', action: 'welcome_letter', desc: 'View and download welcome letter' }]),
+              ...(HIDE_APPRECIATION_LETTER ? [] : [{ icon: 'award-fill',          label: 'My Appreciation Letter', action: 'appreciation_letter', desc: 'Earned at 5 successful referrals' }]),
+              { icon: 'building',            label: 'Booth Info',        action: 'booth_info',   desc: 'Get your booth details' },
+              { icon: 'link-45deg',          label: 'Referral Link',     action: 'referral',     desc: 'Share and invite others' },
+              { icon: 'people-fill',         label: 'My Members',        action: 'my_members',   desc: 'Voters registered via your link' },
+              { icon: 'trophy-fill',         label: 'Best Performers',   action: 'best_performers', desc: 'Top 5 referrers list' },
+              { icon: 'hand-thumbs-up-fill', label: 'Be an Organizer',    action: 'volunteer',    desc: 'Apply to be an Organizer' },
+              { icon: 'building-fill-check', label: 'Be a Booth Agent',  action: 'booth_agent',  desc: 'Apply to be a Booth Agent' },
+              { icon: 'check-square-fill',   label: 'Local Body Election', action: 'local_body',   desc: 'Participate in Local Body elections' },
+            ].map((item) => {
+              const isComingSoon = false
+              const locked = !isDone || (item.action === 'appreciation_letter' && referredCount < 5)
+              const itemHasNotif =
+                (item.action === 'volunteer' && hasVolunteerNotif) ||
+                (item.action === 'booth_agent' && hasBoothAgentNotif)
+              const notifStatus =
+                item.action === 'volunteer' ? volunteerStatus :
+                item.action === 'booth_agent' ? boothAgentStatus : null
+              return (
+                <div
+                  key={item.action}
+                  className={`left-chat-item option-item ${locked ? 'locked' : ''}`}
+                  role="button"
+                  tabIndex={locked ? -1 : 0}
+                  aria-disabled={locked}
+                  onClick={() => !locked && handleSidebarAction(item.action)}
+                  onKeyDown={(e) => { if ((e.key === 'Enter' || e.key === ' ') && !locked) { e.preventDefault(); handleSidebarAction(item.action) } }}
+                  title={isComingSoon ? t('Coming Soon') : (item.action === 'appreciation_letter' && referredCount < 5) ? t('Invite 5 members to unlock appreciation letter') : locked ? t('Complete registration to unlock') : t(item.desc)}
+                >
+                  <div className="left-chat-avatar option-avatar">
+                    <i className={`bi bi-${item.icon}`} />
+                  </div>
+                  <div className="left-chat-details">
+                    <div className="left-chat-name-row">
+                      <div style={{ display: 'flex', alignItems: 'center', gap: 6, flexWrap: 'wrap' }}>
+                        <span className="left-chat-name">{t(item.label)}</span>
+                        {isComingSoon && <span className="coming-soon-badge">{t('Coming Soon')}</span>}
+                        {itemHasNotif && (
+                          <span style={{
+                            display: 'inline-flex', alignItems: 'center', gap: 3,
+                            background: notifStatus === 'confirmed' ? 'rgba(46,204,113,0.15)' : 'rgba(229,57,53,0.15)',
+                            color: notifStatus === 'confirmed' ? '#2ecc71' : '#e53935',
+                            border: `1px solid ${notifStatus === 'confirmed' ? '#2ecc71' : '#e53935'}`,
+                            borderRadius: 20, padding: '1px 7px', fontSize: 10, fontWeight: 700
+                          }}>
+                            {notifStatus === 'confirmed'
+                              ? <><i className="bi bi-check-circle-fill" /> {t('Accepted')}</>
+                              : <><i className="bi bi-x-circle-fill" /> {t('Rejected')}</>}
+                          </span>
+                        )}
+                      </div>
+                      {locked && <i className="bi bi-lock-fill lock-icon" />}
+                    </div>
+                    <div className="left-chat-msg">{t(item.desc)}</div>
+                  </div>
+                </div>
+              )
+            })}
+          </div>
+        </div>
+
+        {/* Right Chatbot Panel */}
+        <div className="right-chat-panel">
+          {activeView === 'booth_info' ? (
+            <FullBoothPanel 
+              epicNo={epicRef.current || cardRef.current?.epic_no || profileRef.current?.epic_no} 
+              onBack={() => setActiveView('chat')} 
+            />
+          ) : activeView === 'profile' ? (
+            <FullProfilePanel 
+              epicNo={epicRef.current || cardRef.current?.epic_no || profileRef.current?.epic_no} 
+              mobile={mobileRef.current || cardRef.current?.mobile || profileRef.current?.mobile} 
+              referredCount={referredCount} 
+              onBack={() => setActiveView('chat')} 
+            />
+          ) : activeView === 'my_card' ? (
+            <FullCardPanel card={cardRef.current} onBack={() => setActiveView('chat')} />
+          ) : activeView === 'welcome_letter' ? (
+            <FullLetterPanel 
+              type="welcome" 
+              name={cardRef.current?.name || cardRef.current?.voter_name || profileRef.current?.name || 'Member'}
+              date={
+                createdAt
+                  ? new Date(createdAt).toLocaleDateString('en-US', { year: 'numeric', month: 'long', day: 'numeric' })
+                  : (cardRef.current?.created_at || profileRef.current?.created_at || cardRef.current?.generated_at || profileRef.current?.generated_at)
+                    ? new Date(cardRef.current?.created_at || profileRef.current?.created_at || cardRef.current?.generated_at || profileRef.current?.generated_at).toLocaleDateString('en-US', { year: 'numeric', month: 'long', day: 'numeric' })
+                    : new Date().toLocaleDateString('en-US', { year: 'numeric', month: 'long', day: 'numeric' })
+              }
+              refCode={cardRef.current?.bjp_code || cardRef.current?.ptc_code || profileRef.current?.bjp_code || profileRef.current?.ptc_code}
+              epicNo={epicRef.current || cardRef.current?.epic_no || profileRef.current?.epic_no}
+              onBack={() => setActiveView('chat')} 
+            />
+          ) : activeView === 'appreciation_letter' ? (
+            <FullLetterPanel 
+              type="appreciation" 
+              name={cardRef.current?.name || cardRef.current?.voter_name || profileRef.current?.name || 'Member'}
+              date={
+                appreciationEarnedAt
+                  ? new Date(appreciationEarnedAt).toLocaleDateString('en-US', { year: 'numeric', month: 'long', day: 'numeric' })
+                  : new Date().toLocaleDateString('en-US', { year: 'numeric', month: 'long', day: 'numeric' })
+              }
+              refCode={cardRef.current?.bjp_code || cardRef.current?.ptc_code || profileRef.current?.bjp_code || profileRef.current?.ptc_code}
+              epicNo={epicRef.current || cardRef.current?.epic_no || profileRef.current?.epic_no}
+              onBack={() => setActiveView('chat')} 
+            />
+          ) : activeView === 'referral' ? (
+            <FullReferralPanel
+              link={cardRef.current?.referral_link || ''}
+              onBack={() => setActiveView('chat')}
+            />
+          ) : activeView === 'best_performers' ? (
+            <BestPerformersPanel onBack={() => setActiveView('chat')} />
+          ) : activeView === 'volunteer' ? (
+            <FullFormPanel title="Be an Organizer" icon="hand-thumbs-up-fill" onBack={() => setActiveView('chat')}>
+              <SelectWingMsg
+                bjpCode={cardRef.current?.bjp_code || cardRef.current?.ptc_code || profileRef.current?.bjp_code || profileRef.current?.ptc_code}
+                epicNo={epicRef.current}
+                isLatest={true}
+              />
+            </FullFormPanel>
+          ) : activeView === 'booth_agent' ? (
+            <FullFormPanel title="Be a Booth Agent" icon="building-fill-check" onBack={() => setActiveView('chat')}>
+              <BoothAgentSetupMsg
+                bjpCode={cardRef.current?.bjp_code || cardRef.current?.ptc_code || profileRef.current?.bjp_code || profileRef.current?.ptc_code}
+                epicNo={epicRef.current}
+                isLatest={true}
+              />
+            </FullFormPanel>
+          ) : activeView === 'local_body' ? (
+            <LocalBodyPanel 
+              onBack={() => setActiveView('chat')} 
+              localBodyInterest={localBodyInterest}
+              handleLocalBodyInterestSubmit={handleLocalBodyInterestSubmit}
+            />
+          ) : activeView === 'my_members' ? (
+            <FullMyMembersPanel 
+              bjpCode={cardRef.current?.bjp_code || cardRef.current?.ptc_code || profileRef.current?.bjp_code || profileRef.current?.ptc_code}
+              onBack={() => setActiveView('chat')} 
+            />
+          ) : (
+            <div className="chatbot-container">
+
+
+            {/* Header */}
+            <header className="chat-header">
+              <div
+                className="chat-header-avatar"
+                onClick={() => isDone && handleSidebarOpen()}
+              >
+                <img src="/org_logo.svg" alt="Logo" onError={(e) => { e.target.style.display = 'none' }} />
+              </div>
+              <div className="chat-header-info">
+                <div className="chat-header-name">{t('TN Member Digital ID Generation')}</div>
+                <div className="chat-header-status">
+                  {chatState === S.GENERATING ? (
+                    <><span className="status-dot-pulsing" /> {t('Generating membership card...')}</>
+                  ) : isDone ? (
+                    <><span className="status-dot-green" /> {t('Online')}</>
+                  ) : (
+                    <><span className="status-dot-green" /> {t('Registration in progress')}</>
+                  )}
+                </div>
+              </div>
+              <div className="chat-header-actions" style={{ display: 'flex', gap: 12, alignItems: 'center' }}>
+                {showTamilVersion && (
+                  <div className="lang-toggle" role="group" aria-label="Language">
+                    <button
+                      type="button"
+                      className={`lang-toggle-btn${lang === 'en' ? ' active' : ''}`}
+                      onClick={() => setLang('en')}
+                      aria-pressed={lang === 'en'}
+                      title="English"
+                    >E</button>
+                    <button
+                      type="button"
+                      className={`lang-toggle-btn${lang === 'ta' ? ' active' : ''}`}
+                      onClick={() => setLang('ta')}
+                      aria-pressed={lang === 'ta'}
+                      title="தமிழ்"
+                    >த</button>
+                  </div>
+                )}
+                {isDone && (
+                  <button
+                    className={`chat-header-btn bell-alert-btn ${
+                      hasPendingNotification ? 'pulsing-vibrate' : ''
+                    } ${hasAppointment ? 'bell-booked-btn' : ''}`}
+                    onClick={handleBellClick}
+                    title={
+                      hasAppointment 
+                        ? 'Meeting Scheduled! Click to view details' 
+                        : 'Milestone Achieved! Click to Schedule Meeting with President'
+                    }
+                    style={{ 
+                      fontSize: 18, 
+                      color: hasAppointment ? '#2ecc71' : '#D1B078', 
+                      border: 'none', 
+                      background: 'none', 
+                      cursor: 'pointer' 
+                    }}
+                  >
+                    <i className="bi bi-bell-fill" />
+                    {hasPendingNotification && <span className="bell-badge" />}
+                  </button>
+                )}
+                {isDone && (
+                  <button
+                    className="chat-header-btn"
+                    onClick={handleSidebarOpen}
+                    title="Menu"
+                  >
+                    <i className="bi bi-list" />
+                  </button>
+                )}
+              </div>
+            </header>
+
+            {/* Messages */}
+            <main className="chat-messages">
+              {messages.map((msg) => {
+                const isLatest = messages[messages.length - 1]?.id === msg.id
+                const isPhotoRequest = isLatest && chatState === S.AWAIT_PHOTO && msg.from === 'bot' && msg.type === 'text'
+
+                if (isPhotoRequest) {
+                  const safeHtml = String(msg.text || '')
+                    .replace(/&/g, '&amp;')
+                    .replace(/</g, '&lt;')
+                    .replace(/>/g, '&gt;')
+                    .replace(/"/g, '&quot;')
+                    .replace(/\*(.*?)\*/g, '<strong>$1</strong>')
+                  return (
+                    <div key={msg.id} className="msg-row bot">
+                      <div className="msg-avatar" aria-hidden="true">
+                        <img src="/org_logo.svg" alt="Logo" onError={(e) => { e.target.onerror = null; e.target.src = '/org_logo.svg' }} />
+                      </div>
+                      <div className="msg-bubble msg-bubble-interactive">
+                        <div className="interactive-body">
+                          <span dangerouslySetInnerHTML={{ __html: safeHtml }} />
+                          <div className="msg-time" style={{ marginTop: 8 }}>
+                            {fmtTime(msg.ts)}
+                          </div>
+                        </div>
+                        <div className="interactive-buttons">
+                          <button className="interactive-btn" onClick={() => fileInputRef.current?.click()}>
+                            <i className="bi bi-cloud-upload-fill" /> {t('Upload Image')}
+                          </button>
+                          <button className="interactive-btn" onClick={() => cameraInputRef.current?.click()}>
+                            <i className="bi bi-camera-fill" /> {t('Take Photo')}
+                          </button>
+                        </div>
+                      </div>
+                    </div>
+                  )
+                }
+
+                return (
+                  <div
+                    key={msg.id}
+                    className={`msg-row ${msg.from}`}
+                  >
+                    {msg.type !== 'welcome_banner' && (
+                      <div className="msg-avatar" aria-hidden="true">
+                        {msg.from === 'bot'
+                          ? <img src="/org_logo.svg" alt="Logo" onError={(e) => { e.target.onerror = null; e.target.src = '/org_logo.svg' }} />
+                          : <i className="bi bi-person-fill" />}
+                      </div>
+                    )}
+                    <div className={`msg-bubble ${['voter_card','generated_card','booth_info','referral_link','members_list','profile_card','welcome_banner','welcome_letter','appreciation_letter'].includes(msg.type) ? 'wide' : ''}`}>
+                      {renderMsgContent(msg)}
+                      <div className="msg-time">
+                        {fmtTime(msg.ts)}
+                      </div>
+                    </div>
+                  </div>
+                )
+              })}
+
+              {isTyping && (
+                <div className="msg-row bot">
+                  <div className="msg-avatar" aria-hidden="true">
+                    <img src="/org_logo.svg" alt="Logo" onError={(e) => { e.target.onerror = null; e.target.src = '/org_logo.svg' }} />
+                  </div>
+                  <div className="typing-bubble" role="status" aria-label={t('Bot is typing')}>
+                    <span className="typing-dot" />
+                    <span className="typing-dot" />
+                    <span className="typing-dot" />
+                  </div>
+                </div>
+              )}
+
+              <div ref={messagesEndRef} style={{ height: 8 }} />
+            </main>
+
+            {/* Resend OTP bar (only during OTP entry) */}
+            {chatState === S.AWAIT_OTP && (
+              <div className="otp-resend-bar">
+                {otpResendIn > 0 ? (
+                  <span className="otp-resend-wait">
+                    <i className="bi bi-clock-history" /> {t('Resend OTP in {seconds}s', { seconds: otpResendIn })}
+                  </span>
+                ) : (
+                  <button type="button" className="otp-resend-btn" onClick={handleResendOtp} disabled={isTyping}>
+                    <i className="bi bi-arrow-clockwise" /> {t('Resend OTP')}
+                  </button>
+                )}
+              </div>
+            )}
+
+            {/* Input area */}
+            <footer className="chat-input-area">
+              {chatState === S.CONFIRM ? (
+                null
+              ) : chatState === S.AWAIT_PHOTO ? (
+                <>
+                  <input
+                    ref={fileInputRef}
+                    type="file"
+                    accept="image/*"
+                    style={{ display: 'none' }}
+                    onChange={(e) => { handleFileSelect(e.target.files?.[0]); e.target.value = '' }}
+                  />
+                  <input
+                    ref={cameraInputRef}
+                    type="file"
+                    accept="image/*"
+                    capture="user"
+                    style={{ display: 'none' }}
+                    onChange={(e) => { handleFileSelect(e.target.files?.[0]); e.target.value = '' }}
+                  />
+                </>
+              ) : chatState === S.GENERATING ? (
+                <div className="generating-bar">
+                  <div className="spinner-border spinner-border-sm text-success" role="status" />
+                  <span>{t('Generating your card, please wait...')}</span>
+                </div>
+              ) : isDone && !inputCfg ? (
+                <div className="chat-form done-bar">
+                  <div className="chat-input-wrapper">
+                    <span className="done-status">
+                      <i className="bi bi-shield-fill-check text-success" />
+                      {t('Card Generated Successfully')}
+                    </span>
+                  </div>
+                  <button className="chat-send-btn menu-btn" onClick={handleSidebarOpen} title={t('Menu')} style={{ position: 'relative' }}>
+                    <i className="bi bi-grid-3x3-gap-fill" />
+                    {hasSidebarNotification && <span style={{ position: 'absolute', top: 4, right: 4, width: 8, height: 8, borderRadius: '50%', background: '#e53935', display: 'block' }} />}
+                  </button>
+                </div>
+              ) : inputCfg ? (
+                <form className="chat-form" onSubmit={handleSubmit} style={{ position: 'relative' }}>
+                  {sendHint && (
+                    <div className="send-hint-bubble" role="status">
+                      {sendHint}
+                    </div>
+                  )}
+                  <div className="chat-input-wrapper">
+                    <input
+                      className="chat-input"
+                      value={inputValue}
+                      onChange={handleInputChange}
+                      onKeyDown={(e) => { if (e.key === 'Enter' && !e.shiftKey) { e.preventDefault(); handleSubmit() } }}
+                      placeholder={inputCfg.placeholder}
+                      aria-label={inputCfg.placeholder}
+                      type={inputCfg.type}
+                      maxLength={inputCfg.maxLength}
+                      inputMode={inputCfg.inputMode}
+                      autoComplete="off"
+                      disabled={isTyping}
+                      autoFocus
+                    />
+                  </div>
+                  <button
+                    type="submit"
+                    className={`chat-send-btn${getIsSendDisabled() ? ' not-ready' : ''}`}
+                    aria-label={t('Send')}
+                    title={t('Send')}
+                  >
+                    <i className="bi bi-send-fill" />
+                  </button>
+                </form>
+              ) : null}
+            </footer>
+          </div>
+          )}
+        </div>
+      </div>
+
+      {/* ── Sidebar ── */}
+      {sidebarOpen && (
+        <div className="sidebar-overlay" onClick={() => setSidebarOpen(false)}>
+          <div className="sidebar-panel" onClick={(e) => e.stopPropagation()}>
+            <div className="sidebar-header" style={{ position: 'relative' }}>
+              <img src="/org_logo.svg" alt="Logo" className="sidebar-logo"
+                onError={(e) => { e.target.src = '/org_logo.svg' }} />
+              <div>
+                <div className="sidebar-brand">{t('TN Member Digital ID Generation')}</div>
+              </div>
+              <button 
+                onClick={() => setSidebarOpen(false)}
+                style={{
+                  position: 'absolute',
+                  top: '50%',
+                  right: 16,
+                  transform: 'translateY(-50%)',
+                  background: 'none',
+                  border: 'none',
+                  color: 'var(--color-ash)',
+                  fontSize: '24px',
+                  cursor: 'pointer',
+                  padding: 4,
+                  display: 'flex',
+                  alignItems: 'center',
+                  justifyContent: 'center',
+                  zIndex: 10
+                }}
+                aria-label={t('Close sidebar')}
+              >
+                <i className="bi bi-x" />
+              </button>
+            </div>
+            <nav className="sidebar-nav">
+              {[
+                { icon: 'person-circle',       label: 'My Profile',       action: 'profile',     desc: 'View registration details' },
+                { icon: 'credit-card-2-front', label: 'My Card',          action: 'my_card',      desc: 'View and download ID card' },
+                ...(HIDE_WELCOME_LETTER ? [] : [{ icon: 'envelope-paper-fill', label: 'My Welcome Letter', action: 'welcome_letter', desc: 'View and download welcome letter' }]),
+                ...(HIDE_APPRECIATION_LETTER ? [] : [{ icon: 'award-fill',          label: 'My Appreciation Letter', action: 'appreciation_letter', desc: 'Earned at 5 successful referrals' }]),
+                { icon: 'building',            label: 'Booth Info',        action: 'booth_info',   desc: 'Get your booth details' },
+                { icon: 'link-45deg',          label: 'Referral Link',     action: 'referral',     desc: 'Share and invite others' },
+                { icon: 'people-fill',         label: 'My Members',        action: 'my_members',   desc: 'Voters registered via your link' },
+                { icon: 'hand-thumbs-up-fill', label: 'Be an Organizer',    action: 'volunteer',    desc: 'Apply to be an Organizer' },
+                { icon: 'building-fill-check', label: 'Be a Booth Agent',  action: 'booth_agent',  desc: 'Apply to be a Booth Agent' },
+                { icon: 'check-square-fill',   label: 'Local Body Election', action: 'local_body',   desc: 'Participate in Local Body elections' },
+              ].map((item) => {
+                const isComingSoon = false
+                const isLocked = item.action === 'appreciation_letter' && referredCount < 5
+                const itemHasNotif =
+                  (item.action === 'volunteer' && hasVolunteerNotif) ||
+                  (item.action === 'booth_agent' && hasBoothAgentNotif)
+                const notifStatus =
+                  item.action === 'volunteer' ? volunteerStatus :
+                  item.action === 'booth_agent' ? boothAgentStatus : null
+                return (
+                  <button
+                    key={item.action}
+                    className={`sidebar-nav-item ${isComingSoon || isLocked ? 'locked' : ''}`}
+                    onClick={() => !isComingSoon && !isLocked && handleSidebarAction(item.action)}
+                    style={isComingSoon || isLocked ? { opacity: 0.5, cursor: 'not-allowed' } : undefined}
+                  >
+                    <div style={{ display: 'flex', alignItems: 'flex-start', gap: 16, width: '100%' }}>
+                      <i className={`bi bi-${item.icon}`} style={{ fontSize: '18px', marginTop: '2px' }} />
+                      <div style={{ display: 'flex', flexDirection: 'column', flex: 1, minWidth: 0 }}>
+                        <div style={{ display: 'flex', alignItems: 'center', gap: 8, flexWrap: 'wrap' }}>
+                          <span style={{ fontSize: '13.5px', fontWeight: '600', color: 'var(--color-chalk)', textAlign: 'left' }}>{t(item.label)}</span>
+                          {isComingSoon && <span className="coming-soon-badge">{t('Coming Soon')}</span>}
+                          {itemHasNotif && (
+                            <span style={{
+                              display: 'inline-flex', alignItems: 'center', gap: 4,
+                              background: notifStatus === 'confirmed' ? 'rgba(46,204,113,0.15)' : 'rgba(229,57,53,0.15)',
+                              color: notifStatus === 'confirmed' ? '#2ecc71' : '#e53935',
+                              border: `1px solid ${notifStatus === 'confirmed' ? '#2ecc71' : '#e53935'}`,
+                              borderRadius: 20, padding: '2px 8px', fontSize: 10, fontWeight: 700,
+                              animation: 'pulse 1.5s infinite'
+                            }}>
+                              {notifStatus === 'confirmed'
+                                ? <><i className="bi bi-check-circle-fill" /> {t('Accepted')}</>  
+                                : <><i className="bi bi-x-circle-fill" /> {t('Rejected')}</>}
+                            </span>
+                          )}
+                        </div>
+                        <div className="sidebar-item-desc">{t(item.desc)}</div>
+                      </div>
+                      {(isComingSoon || isLocked) && <i className="bi bi-lock-fill" style={{ fontSize: 12, opacity: 0.8, marginTop: '4px' }} />}
+                    </div>
+                  </button>
+                )
+              })}
+            </nav>
+            <div className="sidebar-footer">
+              <button className="sidebar-logout-btn" onClick={handleLogout}>
+                <i className="bi bi-box-arrow-left" /> {t('Logout')}
+              </button>
+            </div>
+          </div>
+        </div>
+      )}
+
+      {/* Crop Modal */}
+      {cropOpen && cropSrc && (
+        <CropModal
+          src={cropSrc}
+          onCrop={handleCropComplete}
+          onCancel={() => { setCropOpen(false); setCropSrc('') }}
+        />
+      )}
+
+      {/* Card Full View Modal */}
+      {modalCard && (
+        <CardModal
+          cardData={modalCard}
+          onClose={() => setModalCard(null)}
+        />
+      )}
+
+      {/* Appointment Booking Modal */}
+      {showModal && (
+        <div className="appointment-modal-overlay" onClick={() => setShowModal(false)}>
+          <div className="appointment-modal-content" onClick={(e) => e.stopPropagation()}>
+            <button className="modal-close-btn" onClick={() => setShowModal(false)}>&times;</button>
+            
+            {bookingStep === 1 && (
+              <div className="modal-step-congrats">
+                <div className="modal-icon-wrapper congrats">
+                  <i className="bi bi-trophy-fill congrats-icon" />
+                </div>
+                <h2>{t('Congratulations! 🎉')}</h2>
+                <p className="congrats-text" dangerouslySetInnerHTML={{ __html: t('You have successfully completed *5 referrals*! As a token of appreciation for your outstanding support, you have earned a special opportunity to meet the State President. Are you interested in scheduling a meeting?').replace(/\*(.*?)\*/g, '<strong>$1</strong>') }} />
+                {bookingError && <p className="modal-error-text" style={{ color: '#ff3b30', fontSize: 12, marginBottom: 16 }}>⚠️ {bookingError}</p>}
+                <div className="modal-actions-row" style={{ display: 'flex', gap: 12, marginTop: 20 }}>
+                  <button 
+                    className="btn-modal-action btn-schedule" 
+                    style={{ flex: 1 }}
+                    onClick={() => handleMeetingInterestSubmit('interested')}
+                    disabled={isBooking}
+                  >
+                    {isBooking ? t('Saving...') : t('Interested')}
+                  </button>
+                  <button 
+                    className="btn-modal-action btn-cancel" 
+                    style={{ flex: 1, border: '1px solid var(--border-dim)' }}
+                    onClick={() => handleMeetingInterestSubmit('not_interested')}
+                    disabled={isBooking}
+                  >
+                    {isBooking ? t('Saving...') : t('Not Interested')}
+                  </button>
+                </div>
+              </div>
+            )}
+
+            {bookingStep === 3 && (
+              <div className="modal-step-success">
+                <div className="modal-icon-wrapper success">
+                  <i className="bi bi-check-circle-fill success-icon" />
+                </div>
+                <h2>{t('Preference Saved! 🗓️')}</h2>
+                <p className="success-text">
+                  {meetingInterest === 'interested'
+                    ? t('Thanks for your interest! Your request to meet the State President has been recorded. Our team will contact you soon.')
+                    : t('Thank you for your response. Your preference has been successfully recorded.')
+                  }
+                </p>
+                <div className="modal-actions-row">
+                  <button className="btn-modal-action btn-schedule" onClick={() => setShowModal(false)}>
+                    {t('Done')}
+                  </button>
+                </div>
+              </div>
+            )}
+
+            {bookingStep === 4 && (
+              <div className="modal-step-local-body">
+                <div className="modal-icon-wrapper congrats" style={{ background: 'rgba(209, 176, 120, 0.12)' }}>
+                  <i className="bi bi-building congrats-icon" style={{ color: '#D1B078' }} />
+                </div>
+                <h2>{t('Local Body Elections 🗳️')}</h2>
+                <p className="congrats-text" style={{ fontSize: 13, lineHeight: '1.5' }}>
+                  {t('Are you interested in participating or contesting in the upcoming Local Body Elections? Our Organization is planning candidate profiles and coordinators for each ward/panchayat. Let us know your interest below:')}
+                </p>
+                {bookingError && <p className="modal-error-text" style={{ color: '#ff3b30', fontSize: 12, marginBottom: 16 }}>⚠️ {bookingError}</p>}
+                <div className="modal-actions-row" style={{ display: 'flex', gap: 12, marginTop: 20 }}>
+                  <button 
+                    className="btn-modal-action btn-schedule" 
+                    style={{ flex: 1 }}
+                    onClick={() => handleLocalBodyInterestSubmit('interested')}
+                    disabled={isBooking}
+                  >
+                    {isBooking ? t('Saving...') : t('Interested')}
+                  </button>
+                  <button 
+                    className="btn-modal-action btn-cancel" 
+                    style={{ flex: 1, border: '1px solid var(--border-dim)' }}
+                    onClick={() => handleLocalBodyInterestSubmit('not_interested')}
+                    disabled={isBooking}
+                  >
+                    {isBooking ? t('Saving...') : t('Not Interested')}
+                  </button>
+                </div>
+              </div>
+            )}
+
+            {bookingStep === 5 && (
+              <div className="modal-step-success">
+                <div className="modal-icon-wrapper success">
+                  <i className="bi bi-check-circle-fill success-icon" />
+                </div>
+                <h2>{t('Thank You! 🙏')}</h2>
+                <p className="success-text" style={{ fontSize: 13, lineHeight: '1.5' }}>
+                  {localBodyInterest === 'interested' 
+                    ? t('Thanks for your interest! Your preference has been recorded. Our team will reach out to you with further updates.')
+                    : t('Thank you for your response. Your preference has been successfully recorded.')
+                  }
+                </p>
+                <div className="modal-actions-row" style={{ marginTop: 20 }}>
+                  <button className="btn-modal-action btn-schedule" onClick={() => {
+                    setShowModal(false);
+                    // If they have met milestones (referredCount >= 5) and don't have an appointment yet, route them back to step 1
+                    if (referredCount >= 5 && !hasAppointment) {
+                      setBookingStep(1);
+                    }
+                  }}>
+                    {t('Close')}
+                  </button>
+                </div>
+              </div>
+            )}
+
+            {bookingStep === 6 && (
+              <div className="modal-step-success">
+                <div className="modal-icon-wrapper success" style={{ backgroundColor: 'rgba(46, 125, 50, 0.12)' }}>
+                  <i className="bi bi-patch-check-fill success-icon" style={{ color: '#2e7d32' }} />
+                </div>
+                <h2>{t('Congratulations Organizer! 🎉')}</h2>
+                <p className="success-text" style={{ fontSize: 13, lineHeight: '1.5' }}>
+                  {t('Your application to become an Organizer has been accepted by the State Administrator. Thank you for your leadership and dedication!')}
+                </p>
+                <div className="modal-actions-row" style={{ marginTop: 20 }}>
+                  <button className="btn-modal-action btn-schedule" style={{ backgroundColor: '#2e7d32' }} onClick={() => handleAcknowledgeStatus('volunteer', 'confirmed')}>
+                    {t('Done')}
+                  </button>
+                </div>
+              </div>
+            )}
+
+            {bookingStep === 7 && (
+              <div className="modal-step-success">
+                <div className="modal-icon-wrapper success" style={{ backgroundColor: 'rgba(198, 40, 40, 0.12)' }}>
+                  <i className="bi bi-x-circle-fill success-icon" style={{ color: '#c62828' }} />
+                </div>
+                <h2>{t('Organizer Application ℹ️')}</h2>
+                <p className="success-text" style={{ fontSize: 13, lineHeight: '1.5' }}>
+                  {t('Your application to become an Organizer has been reviewed and rejected by the State Administrator at this time. Thank you for your interest; you can continue to participate and refer new members.')}
+                </p>
+                <div className="modal-actions-row" style={{ marginTop: 20 }}>
+                  <button className="btn-modal-action btn-schedule" style={{ backgroundColor: '#c62828' }} onClick={() => handleAcknowledgeStatus('volunteer', 'rejected')}>
+                    {t('Done')}
+                  </button>
+                </div>
+              </div>
+            )}
+
+            {bookingStep === 8 && (
+              <div className="modal-step-success">
+                <div className="modal-icon-wrapper success" style={{ backgroundColor: 'rgba(21, 101, 192, 0.12)' }}>
+                  <i className="bi bi-shield-fill-check success-icon" style={{ color: '#1565c0' }} />
+                </div>
+                <h2>{t('Congratulations Booth Agent! 🗳️')}</h2>
+                <p className="success-text" style={{ fontSize: 13, lineHeight: '1.5' }}>
+                  {t('Your application to become a Booth Agent has been confirmed by the State Administrator. You are now officially assigned to your booth! Thank you for your valuable support.')}
+                </p>
+                <div className="modal-actions-row" style={{ marginTop: 20 }}>
+                  <button className="btn-modal-action btn-schedule" style={{ backgroundColor: '#1565c0' }} onClick={() => handleAcknowledgeStatus('booth_agent', 'confirmed')}>
+                    {t('Done')}
+                  </button>
+                </div>
+              </div>
+            )}
+
+            {bookingStep === 9 && (
+              <div className="modal-step-success">
+                <div className="modal-icon-wrapper success" style={{ backgroundColor: 'rgba(198, 40, 40, 0.12)' }}>
+                  <i className="bi bi-x-circle-fill success-icon" style={{ color: '#c62828' }} />
+                </div>
+                <h2>{t('Booth Agent Application ℹ️')}</h2>
+                <p className="success-text" style={{ fontSize: 13, lineHeight: '1.5' }}>
+                  {t('Your application to become a Booth Agent has been reviewed and rejected by the State Administrator at this time. Thank you for your interest.')}
+                </p>
+                <div className="modal-actions-row" style={{ marginTop: 20 }}>
+                  <button className="btn-modal-action btn-schedule" style={{ backgroundColor: '#c62828' }} onClick={() => handleAcknowledgeStatus('booth_agent', 'rejected')}>
+                    {t('Done')}
+                  </button>
+                </div>
+              </div>
+            )}
+          </div>
+        </div>
+      )}
+    </div>
+  )
+}

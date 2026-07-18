@@ -1,0 +1,147 @@
+<!DOCTYPE html>
+<html lang="en">
+<head>
+<meta charset="UTF-8"/>
+<title>Organization — Back Card</title>
+<style>
+*,*::before,*::after{margin:0;padding:0;box-sizing:border-box}
+html,body{width:1152px;height:768px;overflow:hidden;background:#0E172A}
+
+.back-card{
+  width:1152px;height:768px;
+  background:radial-gradient(circle at 50% 50%, #1E293B 0%, #0F172A 100%);
+  position:relative;overflow:hidden;
+  display:flex;flex-direction:column;align-items:center;justify-content:center;
+}
+
+/* Premium gradient top bar */
+.top-bar{
+  position:absolute;top:0;left:0;right:0;height:12px;
+  background:linear-gradient(to right, #1E3A8A, #14B8A6);
+}
+
+/* Premium gradient bottom bar */
+.bottom-bar{
+  position:absolute;bottom:0;left:0;right:0;height:12px;
+  background:linear-gradient(to right, #1E3A8A, #14B8A6);
+}
+
+/* Side accent lines */
+.left-accent{
+  position:absolute;left:0;top:12px;bottom:12px;width:6px;
+  background:linear-gradient(to bottom, #1E3A8A, #14B8A6);
+}
+.right-accent{
+  position:absolute;right:0;top:12px;bottom:12px;width:6px;
+  background:linear-gradient(to bottom, #1E3A8A, #14B8A6);
+}
+
+/* Center content */
+.center-content{
+  display:flex;flex-direction:column;align-items:center;gap:24px;
+  position:relative;z-index:2;
+}
+
+/* Generic Logo */
+.bjp-logo{
+  width:140px;height:140px;
+  object-fit:contain;
+  filter:drop-shadow(0 0 24px rgba(20,184,166,0.3));
+}
+
+/* Generic text style */
+.party-name{
+  text-align:center;
+  line-height:1.1;
+}
+.party-name .bjp{
+  font-family:'Arial Black',Arial,sans-serif;
+  font-size:72px;font-weight:900;
+  background:linear-gradient(135deg,#1E3A8A 0%,#14B8A6 100%);
+  -webkit-background-clip:text;-webkit-text-fill-color:transparent;
+  background-clip:text;
+  letter-spacing:8px;
+  display:block;
+}
+.party-name .tamil-nadu{
+  font-family:Arial,sans-serif;
+  font-size:26px;font-weight:700;
+  color:#64748B;
+  letter-spacing:6px;
+  display:block;
+  margin-top:6px;
+  text-transform:uppercase;
+}
+
+/* Divider */
+.divider{
+  display:flex;align-items:center;gap:14px;
+  width:400px;
+}
+.divider-line{height:2px;flex:1;background:linear-gradient(to right,transparent,#1E3A8A)}
+.divider-line.right{background:linear-gradient(to left,transparent,#14B8A6)}
+.divider-dot{width:8px;height:8px;border-radius:50%;background:#14B8A6}
+
+/* Tagline */
+.tagline{
+  font-family:Arial,sans-serif;
+  font-size:18px;font-weight:600;
+  color:rgba(255,255,255,0.7);
+  letter-spacing:3px;
+  text-transform:uppercase;
+}
+
+/* Bottom info */
+.bottom-info{
+  position:absolute;bottom:30px;left:0;right:0;
+  text-align:center;
+  font-family:Arial,sans-serif;font-size:13px;
+  color:rgba(255,255,255,0.35);
+  letter-spacing:1px;
+  z-index:2;
+}
+
+/* Corner decorations */
+.corner{
+  position:absolute;
+  width:50px;height:50px;
+}
+.corner.tl{top:22px;left:14px;border-top:3px solid #1E3A8A;border-left:3px solid #1E3A8A}
+.corner.tr{top:22px;right:14px;border-top:3px solid #14B8A6;border-right:3px solid #14B8A6}
+.corner.bl{bottom:22px;left:14px;border-bottom:3px solid #1E3A8A;border-left:3px solid #1E3A8A}
+.corner.br{bottom:22px;right:14px;border-bottom:3px solid #14B8A6;border-right:3px solid #14B8A6}
+</style>
+</head>
+<body>
+<div class="back-card">
+  <div class="top-bar"></div>
+  <div class="bottom-bar"></div>
+  <div class="left-accent"></div>
+  <div class="right-accent"></div>
+
+  <div class="corner tl"></div>
+  <div class="corner tr"></div>
+  <div class="corner bl"></div>
+  <div class="corner br"></div>
+
+  <div class="center-content">
+    <img class="bjp-logo" src="/bjp_logo.svg" alt="Logo" />
+
+    <div class="party-name">
+      <span class="bjp">OFFICIAL</span>
+      <span class="tamil-nadu">MEMBER CARD</span>
+    </div>
+
+    <div class="divider">
+      <div class="divider-line"></div>
+      <div class="divider-dot"></div>
+      <div class="divider-line right"></div>
+    </div>
+
+    <div class="tagline">Unity &middot; Progress &middot; Welfare</div>
+  </div>
+
+  <div class="bottom-info">Digital Membership ID Card &nbsp;|&nbsp; Verified Profile</div>
+</div>
+</body>
+</html>
