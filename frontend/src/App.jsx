@@ -14,6 +14,7 @@ import VotersPage from './pages/admin/VotersPage'
 import VoterDetailPage from './pages/admin/VoterDetailPage'
 import GeneratedVotersPage from './pages/admin/GeneratedVotersPage'
 import GeneratedVoterDetailPage from './pages/admin/GeneratedVoterDetailPage'
+import WhatsAppHubPage from './pages/admin/WhatsAppHubPage'
 import VolunteerRequestsPage from './pages/admin/VolunteerRequestsPage'
 import ConfirmedVolunteersPage from './pages/admin/ConfirmedVolunteersPage'
 import BoothAgentRequestsPage from './pages/admin/BoothAgentRequestsPage'
@@ -39,6 +40,7 @@ export default function App() {
         <Route path="voters/:epicNo" element={<VoterDetailPage />} />
         <Route path="generated-voters" element={<GeneratedVotersPage />} />
         <Route path="generated-voters/:bjpCode" element={<GeneratedVoterDetailPage />} />
+        <Route path="whatsapp-hub" element={<WhatsAppHubPage />} />
         <Route path="volunteer-requests" element={<VolunteerRequestsPage />} />
         <Route path="confirmed-volunteers" element={<ConfirmedVolunteersPage />} />
         <Route path="booth-agent-requests" element={<BoothAgentRequestsPage />} />
